@@ -171,15 +171,46 @@ def make_image_node(mat, path, channel):
     return img
 
 
-def wire_textures(new_mat, chosen, opts, log):
-    """chosen = {channel: path}. Returns number of channels wired."""
+def clear_textures(mat):
+    """Remove any placeholder texture nodes copied from the template clone and
+    null every channel link, so freshly matched maps always go in (the
+    template's Diffuse texture would otherwise read as 'already connected')."""
+    for lid in set(OCT_LINK.values()):
+        try:
+            mat[lid] = None
+        except Exception:
+            pass
+    sh = mat.GetFirstShader()
+    while sh:
+        nxt = sh.GetNext()
+        sh.Remove()
+        sh = nxt
+
+
+def tags_under(root):
+    """All texture tags on `root` and its descendants."""
+    out = []
+
+    def rec(o):
+        while o:
+            for t in o.GetTags():
+                if t.GetType() == c4d.Ttexture:
+                    out.append(t)
+            rec(o.GetDown())
+            o = o.GetNext()
+
+    rec(root)
+    return out
+
+
+def wire_textures(new_mat, chosen, log):
+    """chosen = {channel: path}. Returns number of channels wired.
+    The clone is cleared first, so every matched map is linked (diffuse
+    included)."""
     n = 0
     for channel, path in sorted(chosen.items()):
         link = OCT_LINK.get(channel)
         if link is None:
-            continue
-        if not opts["overwrite"] and new_mat[link] is not None:
-            log("      [skip] %-12s already linked" % channel)
             continue
         img = make_image_node(new_mat, path, channel)
         new_mat[link] = img
@@ -237,6 +268,9 @@ class ProgressArea(gui.GeUserArea):
 # ---------------------------------------------------------------------------
 
 TICK_BUDGET_MS = 50
+# Refresh Octane after at most this many new materials (and at every group
+# boundary), so it streams textures in chunks instead of all at once.
+EVENT_BATCH = 8
 
 G_TEX = 4001
 G_BROWSE = 4002
@@ -287,7 +321,6 @@ class OctaneLinkerDialog(gui.GeDialog):
 
         self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
         self.AddCheckbox(G_DRYRUN, c4d.BFH_LEFT, 0, 0, "Dry run (preview)")
-        self.AddCheckbox(G_OVERWRITE, c4d.BFH_LEFT, 0, 0, "Overwrite existing")
         self.AddCheckbox(G_RECURSE, c4d.BFH_LEFT, 0, 0, "Recurse textures")
         self.AddCheckbox(G_REMOVE, c4d.BFH_LEFT, 0, 0,
                          "Remove standard materials")
@@ -313,7 +346,6 @@ class OctaneLinkerDialog(gui.GeDialog):
 
     def InitValues(self):
         self.SetBool(G_DRYRUN, False)
-        self.SetBool(G_OVERWRITE, False)
         self.SetBool(G_RECURSE, True)
         self.SetBool(G_REMOVE, True)
         self.SetBool(G_COLOR, True)
@@ -379,7 +411,6 @@ class OctaneLinkerDialog(gui.GeDialog):
         self._doc = doc
         self._template = template
         self._dry = self.GetBool(G_DRYRUN)
-        self._overwrite = self.GetBool(G_OVERWRITE)
         self._remove = self.GetBool(G_REMOVE)
         self._copy_color = self.GetBool(G_COLOR)
         sel = self.GetInt32(G_MATCH)
@@ -417,9 +448,25 @@ class OctaneLinkerDialog(gui.GeDialog):
         self._wired = 0
         self._namemap = {}     # old name (lower) -> new octane material
         self._old = []         # originals to remove
-        self._tags = []
+        self._since_event = 0
         self._cur = "Starting..."
-        self._phase = "convert"
+
+        if self._dry:
+            self._dry_list = self._mats
+            self._phase = "dry"
+        else:
+            # Process one scene group (top-level object) at a time, so Octane
+            # isn't asked to compile every material/load every texture at once.
+            self._groups = []
+            o = self._doc.GetFirstObject()
+            while o:
+                self._groups.append((o.GetName(), tags_under(o)))
+                o = o.GetNext()
+            self._total_tags = sum(len(t) for _, t in self._groups) or 1
+            self._done_tags = 0
+            self._gi = 0
+            self._ti = 0
+            self._phase = "process"
 
         if not self._dry:
             self._doc.StartUndo()
@@ -428,75 +475,76 @@ class OctaneLinkerDialog(gui.GeDialog):
         self.Enable(G_CANCEL, True)
         self.SetTimer(20)
 
-    def _convert_one(self, orig):
+    def _convert_material(self, orig):
+        """Build the Octane Universal material for `orig` and return it."""
         name = orig.GetName()
         chosen = collect_matches(name, self._textures, self._match_all, True)
-        self._log("Material: %s  (%d map(s))" % (name, len(chosen)))
-        if self._dry:
-            for ch, path in sorted(chosen.items()):
-                self._log("   [dry] %-12s -> %s"
-                          % (ch, os.path.basename(path)))
-            return
-
         new = self._template.GetClone()
         new.SetName(name)
+        clear_textures(new)        # so diffuse (and all maps) always load
         if self._copy_color and orig[c4d.MATERIAL_USE_COLOR] \
                 and "color" not in chosen:
             try:
                 new[OCT_DIFFUSE_COLOR] = orig[c4d.MATERIAL_COLOR_COLOR]
             except Exception:
                 pass
-        opts = {"overwrite": self._overwrite}
-        self._wired += wire_textures(new, chosen, opts, self._log)
+        self._log("Material: %s  (%d map(s))" % (name, len(chosen)))
+        self._wired += wire_textures(new, chosen, self._log)
         self._doc.InsertMaterial(new)
         self._doc.AddUndo(c4d.UNDOTYPE_NEW, new)
         self._namemap[name.lower()] = new
         self._old.append(orig)
         self._converted += 1
+        return new
 
     def _step(self):
         ph = self._phase
 
-        if ph == "convert":
-            if self._idx < len(self._mats):
-                self._cur = "Converting %d/%d" % (self._idx + 1,
-                                                  len(self._mats))
-                self._convert_one(self._mats[self._idx])
+        if ph == "dry":
+            if self._idx < len(self._dry_list):
+                orig = self._dry_list[self._idx]
+                self._cur = "Preview %d/%d" % (self._idx + 1,
+                                               len(self._dry_list))
+                chosen = collect_matches(orig.GetName(), self._textures,
+                                         self._match_all, True)
+                self._log("Material: %s  (%d map(s))"
+                          % (orig.GetName(), len(chosen)))
+                for ch, path in sorted(chosen.items()):
+                    self._log("   [dry] %-12s -> %s"
+                              % (ch, os.path.basename(path)))
                 self._idx += 1
             else:
-                if self._dry:
-                    self._phase = "finish"
-                else:
-                    # Gather all texture tags for reassignment.
-                    self._tags = []
-                    o = self._doc.GetFirstObject()
-                    stack = [o]
-                    while stack:
-                        n = stack.pop()
-                        while n:
-                            for t in n.GetTags():
-                                if t.GetType() == c4d.Ttexture:
-                                    self._tags.append(t)
-                            d = n.GetDown()
-                            if d:
-                                stack.append(d)
-                            n = n.GetNext()
-                    self._idx = 0
-                    self._phase = "reassign"
+                self._phase = "finish"
             return False
 
-        if ph == "reassign":
-            if self._idx < len(self._tags):
-                self._cur = "Re-assigning %d/%d" % (self._idx + 1,
-                                                    len(self._tags))
-                tag = self._tags[self._idx]
-                m = tag[c4d.TEXTURETAG_MATERIAL]
-                if m is not None and m.GetType() == c4d.Mmaterial:
-                    newm = self._namemap.get(m.GetName().lower())
-                    if newm is not None:
+        if ph == "process":
+            if self._gi < len(self._groups):
+                gname, tags = self._groups[self._gi]
+                if self._ti < len(tags):
+                    self._cur = "Group '%s'  %d/%d" % (
+                        gname, self._done_tags + 1, self._total_tags)
+                    tag = tags[self._ti]
+                    m = tag[c4d.TEXTURETAG_MATERIAL]
+                    if m is not None and m.GetType() == c4d.Mmaterial:
+                        new = self._namemap.get(m.GetName().lower())
+                        if new is None:
+                            new = self._convert_material(m)
+                            self._since_event += 1
                         self._doc.AddUndo(c4d.UNDOTYPE_CHANGE, tag)
-                        tag[c4d.TEXTURETAG_MATERIAL] = newm
-                self._idx += 1
+                        tag[c4d.TEXTURETAG_MATERIAL] = new
+                    self._ti += 1
+                    self._done_tags += 1
+                    # Safety valve: refresh Octane every few new materials.
+                    if self._since_event >= EVENT_BATCH:
+                        self._since_event = 0
+                        c4d.EventAdd()
+                else:
+                    # Group done -> let Octane digest this group's textures.
+                    if self._since_event > 0:
+                        self._since_event = 0
+                        c4d.EventAdd()
+                    self._gi += 1
+                    self._ti = 0
             else:
                 self._idx = 0
                 self._phase = "cleanup" if self._remove else "finish"
@@ -518,10 +566,10 @@ class OctaneLinkerDialog(gui.GeDialog):
 
     def _update_progress(self):
         ph = self._phase
-        if ph == "convert":
-            frac = self._idx / float(len(self._mats) or 1)
-        elif ph == "reassign":
-            frac = self._idx / float(len(self._tags) or 1)
+        if ph == "dry":
+            frac = self._idx / float(len(self._dry_list) or 1)
+        elif ph == "process":
+            frac = self._done_tags / float(self._total_tags or 1)
         elif ph == "cleanup":
             frac = self._idx / float(len(self._old) or 1)
         elif ph == "finish":
@@ -571,7 +619,9 @@ class OctaneLinkerDialog(gui.GeDialog):
                     done = True
                     break
             self._update_progress()
-            c4d.EventAdd()
+            # NB: no EventAdd here -- Octane is refreshed per group/batch in
+            # _step so it isn't hit with every material at once (which crashes
+            # it). The progress bar updates without a scene event.
             if done:
                 self._finish()
         except Exception:

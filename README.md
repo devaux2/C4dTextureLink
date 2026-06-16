@@ -117,6 +117,14 @@ Workflow:
    Transmission, Emission), copies the base colour, and swaps it onto the
    objects that used the standard material. One undo step.
 
+Notes:
+
+- The template clone's placeholder textures are stripped before wiring, so the
+  **Diffuse map always loads** (it won't be skipped as "already connected").
+- Conversion runs **one scene group (Null) at a time**, refreshing Octane only
+  at each group boundary (and every few materials), so it streams textures in
+  chunks instead of compiling everything at once — which can crash Octane.
+
 ## Deduplicate into instances
 
 `mesh_instancer.py` finds objects that are the **same shape** and replaces the
