@@ -125,42 +125,34 @@ def gather_files(folder, extensions, recursive):
 
 
 def group_key(path):
-    """Derive a grouping key from a file name by dropping trailing
-    numbers/variant suffixes:  tree008 -> tree,  rock_02b -> rock,
-    greevil_egg_001 -> greevil_egg."""
-    base = os.path.splitext(os.path.basename(path))[0]
-    key = re.sub(r"[ _\-.]*\d+[a-z]?$", "", base, flags=re.IGNORECASE)
-    key = re.sub(r"[ _\-.]+$", "", key)
-    return key if key else base
+    """Group key = the file's exact base name (no extension). Numbers are
+    KEPT, so tree007 and tree008 stay separate groups."""
+    return os.path.splitext(os.path.basename(path))[0]
 
 
 def build_import_plan(paths, do_group):
     """Turn [(full, rel), ...] into an ordered import plan.
 
-    Returns (plan, grouped, singles) where:
-      plan    = [(group_name_or_None, full_path), ...] in import order
-      grouped = [(group_name, count), ...] for groups of 2+ files
-      singles = number of files imported on their own (no group)
+    With grouping on, each file's objects go under a Null named after the
+    file (its base name). Returns (plan, groups) where:
+      plan   = [(group_name_or_None, full_path), ...] in import order
+      groups = [(group_name, file_count), ...] (file_count > 1 only when
+               several files share the same base name)
     """
-    groups = {}
-    for full, _rel in paths:
-        k = group_key(full)
-        g = groups.setdefault(k.lower(), {"name": k, "files": []})
-        g["files"].append(full)
+    if not do_group:
+        return [(None, full) for full, _rel in paths], []
 
-    plan, grouped, singles = [], [], 0
-    for kl in sorted(groups):
-        g = groups[kl]
-        files = sorted(g["files"])
-        if do_group and len(files) >= 2:
-            for f in files:
-                plan.append((g["name"], f))
-            grouped.append((g["name"], len(files)))
-        else:
-            for f in files:
-                plan.append((None, f))
-            singles += len(files)
-    return plan, grouped, singles
+    plan, order, counts = [], [], {}
+    for full, _rel in paths:
+        name = group_key(full)
+        plan.append((name, full))
+        k = name.lower()
+        if k not in counts:
+            counts[k] = [name, 0]
+            order.append(k)
+        counts[k][1] += 1
+    groups = [(counts[k][0], counts[k][1]) for k in order]
+    return plan, groups
 
 
 def detect_channel(file_path, allow_single_letter):
@@ -436,7 +428,7 @@ def import_objects(doc, opts, log, progress=None):
         log("No importable 3D files found in: %s" % opts.objects_folder)
         return 0
 
-    plan, _grouped, _singles = build_import_plan(paths, opts.group)
+    plan, _groups = build_import_plan(paths, opts.group)
     nulls = {}
     imported = 0
     offset_index = 0
@@ -601,7 +593,7 @@ class TextureToolDialog(gui.GeDialog):
 
         self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
         self.AddCheckbox(G_GROUP, c4d.BFH_LEFT, 0, 0,
-                         "Group similar objects under Nulls")
+                         "Group each file's parts under a Null")
         self.AddCheckbox(G_DRYRUN, c4d.BFH_LEFT, 0, 0,
                          "Dry run (link preview)")
         self.AddCheckbox(G_OVERWRITE, c4d.BFH_LEFT, 0, 0,
@@ -728,13 +720,14 @@ class TextureToolDialog(gui.GeDialog):
         return False
 
     # --- grouping preview -------------------------------------------------
-    def _plan_summary_lines(self, grouped, singles, total):
-        lines = ["%d file(s): %d group(s), %d ungrouped."
-                 % (total, len(grouped), singles)]
-        for name, count in grouped[:20]:
-            lines.append("   %s  (%d)" % (name, count))
-        if len(grouped) > 20:
-            lines.append("   ... and %d more group(s)" % (len(grouped) - 20))
+    def _plan_summary_lines(self, groups, total):
+        lines = ["%d file(s)  ->  %d Null group(s) (named after each file):"
+                 % (total, len(groups)), ""]
+        for name, count in groups[:25]:
+            suffix = "  (%d files)" % count if count > 1 else ""
+            lines.append("   %s%s" % (name, suffix))
+        if len(groups) > 25:
+            lines.append("   ... and %d more" % (len(groups) - 25))
         return lines
 
     def _preview_groups(self):
@@ -747,9 +740,13 @@ class TextureToolDialog(gui.GeDialog):
         if not paths:
             self.SetString(G_LOG, "No importable 3D files found.")
             return
-        _plan, grouped, singles = build_import_plan(paths, self.GetBool(G_GROUP))
+        if not self.GetBool(G_GROUP):
+            self.SetString(G_LOG, "Grouping is off: %d file(s) import "
+                                  "individually." % len(paths))
+            return
+        _plan, groups = build_import_plan(paths, True)
         self._loglines = ["Group preview (nothing imported yet):", ""]
-        self._loglines += self._plan_summary_lines(grouped, singles, len(paths))
+        self._loglines += self._plan_summary_lines(groups, len(paths))
         self.SetString(G_LOG, "\n".join(self._loglines))
 
     # --- run pipeline incrementally on the timer --------------------------
@@ -777,10 +774,10 @@ class TextureToolDialog(gui.GeDialog):
             if not paths:
                 self.SetString(G_LOG, "No importable 3D files found.")
                 return
-            plan, grouped, singles = build_import_plan(paths, opts.group)
+            plan, groups = build_import_plan(paths, opts.group)
             if opts.group:
                 summary = "\n".join(
-                    self._plan_summary_lines(grouped, singles, len(paths)))
+                    self._plan_summary_lines(groups, len(paths)))
                 if not gui.QuestionDialog(
                         "Import and organise these?\n\n" + summary):
                     return
