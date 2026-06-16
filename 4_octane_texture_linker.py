@@ -44,6 +44,9 @@ from c4d import gui, storage, documents
 OCT_MAT_ID = 1029501          # Octane Material plugin
 OCT_IMG_ID = 1029508          # Octane Image Texture node
 OCT_IMG_FILE = 1100           # Image Texture > File (filename)
+OCT_IMG_TYPE = 1105           # Image Texture > Type (0=normal, 2=alpha)
+OCT_IMG_TYPE_ALPHA = 2        # ... the "Alpha" option (from octane_probe)
+OCT_IMG_INVERT = 1117         # Image Texture > Linear space invert
 OCT_DIFFUSE_COLOR = 2515      # Universal > Diffuse > Color (vector)
 
 # channel key -> Universal "Texture" link parameter id
@@ -283,10 +286,13 @@ def tags_under(root):
     return out
 
 
-def wire_textures(new_mat, chosen, log):
+def wire_textures(new_mat, chosen, log, alpha_from_color=True):
     """chosen = {channel: path}. Returns number of channels wired.
     The clone is cleared first, so every matched map is linked (diffuse
-    included)."""
+    included). When there's a colour map but no separate opacity map and
+    `alpha_from_color` is on, a second image node of the same colour file is
+    added with Type=Alpha and wired into Opacity (Source 2 foliage stores the
+    cutout in the colour image's alpha channel)."""
     n = 0
     for channel, path in sorted(chosen.items()):
         link = OCT_LINK.get(channel)
@@ -295,6 +301,20 @@ def wire_textures(new_mat, chosen, log):
         img = make_image_node(new_mat, path, channel)
         new_mat[link] = img
         log("      [ok]  %-12s -> %s" % (channel, os.path.basename(path)))
+        n += 1
+
+    # Cutout: colour image's alpha channel -> Opacity (no separate alpha file).
+    if alpha_from_color and "color" in chosen and "alpha" not in chosen:
+        cpath = chosen["color"]
+        img = make_image_node(new_mat, cpath, "opacity")
+        try:
+            img[OCT_IMG_TYPE] = OCT_IMG_TYPE_ALPHA   # output the alpha channel
+            img[OCT_IMG_INVERT] = 1                  # matches working setup
+        except Exception:
+            pass
+        new_mat[OCT_LINK["alpha"]] = img
+        log("      [ok]  %-12s -> %s (colour alpha)"
+            % ("opacity", os.path.basename(cpath)))
         n += 1
     return n
 
@@ -373,6 +393,7 @@ G_CLOSE = 4011
 G_LOG = 4012
 G_PROG = 4013
 G_NEXT = 4014
+G_ALPHA = 4015
 
 MATCH_AUTO, MATCH_NAME, MATCH_ALL = 0, 1, 2
 
@@ -416,6 +437,8 @@ class OctaneLinkerDialog(gui.GeDialog):
                          "Remove standard materials")
         self.AddCheckbox(G_COLOR, c4d.BFH_LEFT, 0, 0,
                          "Copy base colour")
+        self.AddCheckbox(G_ALPHA, c4d.BFH_LEFT, 0, 0,
+                         "Cutout: colour alpha -> Opacity")
         self.GroupEnd()
 
         self.AddUserArea(G_PROG, c4d.BFH_SCALEFIT, 0, 18)
@@ -440,6 +463,7 @@ class OctaneLinkerDialog(gui.GeDialog):
         self.SetBool(G_RECURSE, True)
         self.SetBool(G_REMOVE, True)
         self.SetBool(G_COLOR, True)
+        self.SetBool(G_ALPHA, True)
         self.SetInt32(G_MATCH, MATCH_AUTO)
         self.Enable(G_NEXT, False)
         self.Enable(G_CANCEL, False)
@@ -522,6 +546,7 @@ class OctaneLinkerDialog(gui.GeDialog):
         self._dry = self.GetBool(G_DRYRUN)
         self._remove = self.GetBool(G_REMOVE)
         self._copy_color = self.GetBool(G_COLOR)
+        self._alpha_from_color = self.GetBool(G_ALPHA)
         sel = self.GetInt32(G_MATCH)
         mode = {MATCH_AUTO: "auto", MATCH_NAME: "name",
                 MATCH_ALL: "all"}.get(sel, "auto")
@@ -674,7 +699,8 @@ class OctaneLinkerDialog(gui.GeDialog):
                 pass
         self._log("Material: %s%s  (%d map(s))"
                   % (name, "  [key:%s]" % key if key else "", len(chosen)))
-        self._wired += wire_textures(new, chosen, self._log)
+        self._wired += wire_textures(new, chosen, self._log,
+                                     self._alpha_from_color)
         self._doc.InsertMaterial(new)
         self._doc.AddUndo(c4d.UNDOTYPE_NEW, new)
         self._namemap[name.lower()] = new
