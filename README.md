@@ -14,6 +14,7 @@ bar, a results log, and a Cancel button; every run is a single undo step.
 | 2 | `2_mesh_instancer.py` | Replace duplicated meshes with instances (shape-matched, transform-aware). |
 | 3 | `3_octane_inspector.py` | One-off: read your Octane build's parameter IDs (only if your version differs). |
 | 4 | `4_octane_texture_linker.py` | Build Octane Universal materials and wire the matching textures. |
+| 4b | `add_opacity.py` | Add the colour-alpha → Opacity cutout to Octane materials **already textured** (no re-import). |
 
 ## Getting assets in (format matters)
 
