@@ -14,6 +14,7 @@ bar, a results log, and a Cancel button; every run is a single undo step.
 | 1d | `organize_scene.py` | Sort the whole top level under ~10 theme Nulls (Water/Trees/Rocks/Structures/Props/Dire/Radiant/Overlays/…). |
 | - | `dump_names.py` | Export every object name to a chosen `.txt` (for diagnosing naming). |
 | 2 | `2_mesh_instancer.py` | Replace duplicated meshes with instances (shape-matched, transform-aware). |
+| 2b | `decimate.py` | In-place polygon reduction of selected meshes (instances follow their master). |
 | 3 | `3_octane_inspector.py` | One-off: read your Octane build's parameter IDs (only if your version differs). |
 | 4 | `4_octane_texture_linker.py` | Build Octane Universal materials and wire the matching textures. |
 | 4b | `add_opacity.py` | Add the colour-alpha → Opacity cutout to Octane materials **already textured** (no re-import). |
