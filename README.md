@@ -1,88 +1,55 @@
-# C4D Texture Linker
+# C4D Texture Tool
 
-Cinema 4D **S24** Python scripts that auto-connect texture maps to the correct
-material channels — built for the "import an OBJ + MTL group, then wire up all
-the PBR maps from another folder" workflow, without doing it by hand for every
-material.
+A single, self-contained Cinema 4D **S24** Python script that:
 
-Two entry points:
+1. *(optional)* imports a whole folder of 3D objects (OBJ/FBX/3DS/ABC/glTF/…)
+   into the current scene, then
+2. auto-connects textures from a folder to the correct **material channels**
+   (BaseColor / Normal / Roughness / Bump / Displacement / Opacity / …).
 
-- **`texture_linker.py`** — link textures to the materials already in your
-  scene.
-- **`import_and_link.py`** — one shot: import a whole folder of objects, *then*
-  link textures from a second folder. (Imports its matching logic from
-  `texture_linker.py`, so keep both files in the same folder.)
+Built for the "import a big OBJ + MTL group, then wire up all the PBR maps from
+another folder" workflow — without doing it by hand for every material.
 
-## What it does
-
-1. You pick a folder of texture maps.
-2. For every **classic material** in the scene it looks for textures whose
-   file name contains the material's name.
-3. It detects each map's channel from its file-name suffix
-   (`BaseColor`, `Normal`, `Roughness`, `Bump`, `Displacement`, `Opacity`, …).
-4. It creates a bitmap shader and plugs it into the right slot, setting the
-   colour profile (sRGB for colour maps, linear for data maps).
+It opens a small dialog so you can **see it working**: folder pickers, options,
+a progress bar in C4D's status bar, and a live results log (errors show up in
+that log too, so it never silently does nothing).
 
 ## How to run
 
-- Cinema 4D → **Script Manager** (`Shift+F11`) → open `texture_linker.py` →
-  **Execute**.
-- Or place it in your scripts folder so it appears under
-  **Extensions → User Scripts**.
+Cinema 4D → **Script Manager** (`Shift+F11`) → open `texture_tool.py` →
+**Execute**. One file, no dependencies — nothing to import, nothing to break.
 
-A folder picker appears; choose your texture folder. A summary dialog reports
-what was assigned, and the full log is printed to the Python console.
+## Using the dialog
 
-## Import + link in one go
-
-Run `import_and_link.py` from the Script Manager. It asks for:
-
-1. an **objects folder** — every `.obj`/`.fbx`/`.3ds`/`.dae`/`.abc`/`.gltf`/…
-   file in it is merged into the current scene;
-2. a **texture folder** — textures are then matched to the resulting
-   materials exactly as `texture_linker.py` does.
-
-Both steps happen inside a single undo block, so one `Ctrl+Z` reverts the
-whole operation. Key settings at the top of the file:
-
-| Setting | Purpose |
+| Control | What it does |
 | --- | --- |
-| `OBJECTS_FOLDER` / `TEXTURE_FOLDER` | Hard-code folders to skip the pickers. |
-| `RECURSIVE_OBJECTS` | Search sub-folders for objects to import. |
-| `SPREAD_OBJECTS` / `SPREAD_SPACING` | Offset each imported file along X so they don't overlap. |
+| **Import objects** | When ticked, every importable file in the *Objects folder* is merged into the scene first. Untick to only link textures to existing materials. |
+| **Objects / Texture folder** | Pick with **Browse…** |
+| **Match mode** | How files are matched to materials (see below). |
+| **Dry run** | Preview only — logs what *would* be wired up without changing anything. Run this first. |
+| **Overwrite existing** | Replace a channel that already has a shader. |
+| **Recurse textures / objects** | Search sub-folders. |
+| **Spread imports** | Offset each imported file along X so they don't pile up at the origin. |
+| **Run** | Do it. Progress shows in the status bar; results fill the log. |
 
-## Configuration
+## How files are matched to materials
 
-Edit the `CONFIG` block at the top of `texture_linker.py`:
+A texture is detected by its **file-name suffix** (`*_BaseColor`, `*_Normal`,
+`*_Roughness`, `*_Bump`, `*_Disp`, `*_Opacity`, `wood_N`, …) and matched to a
+material by one of:
 
-| Setting | Purpose |
-| --- | --- |
-| `TEXTURE_FOLDER` | Hard-code a folder to skip the picker (`None` = always prompt). |
-| `RECURSIVE` | Search sub-folders too. |
-| `DRY_RUN` | Log what *would* happen without changing anything. |
-| `OVERWRITE_EXISTING` | Replace a channel that already has a shader. |
-| `MATCH_MODE` | `"name_in_filename"` (many materials share a folder) or `"all"` (one material per folder). |
+- **Auto** *(default)* — match by material name; but if the scene has exactly
+  **one** material, that material gets every map (no name needed).
+- **By material name only** — a texture is linked when the material's name
+  appears in the texture's path relative to the chosen folder. So all of these
+  match material `WoodFloor`:
+  - `WoodFloor_BaseColor.png`
+  - `WoodFloor/basecolor.png` (a sub-folder named after the material)
+  - `wood_floor_color.png` (material named `Wood Floor`)
+- **All files → every material** — for one-material-per-folder setups.
 
-### How files are matched to materials
-
-In `"name_in_filename"` mode a texture is linked to a material when, after
-stripping punctuation/case, **the material's name appears in the texture's path
-relative to the chosen folder**. So all of these match material `WoodFloor`:
-
-- `WoodFloor_BaseColor.png`
-- `WoodFloor/basecolor.png` (a sub-folder named after the material)
-- `wood_floor_color.png` (material named `Wood Floor`)
-
-Two conveniences:
-
-- If the scene has **exactly one classic material**, name-matching is skipped
-  and every file in the folder is used (a lone material owns all the maps).
-- If nothing matches, the log prints your material names and a few example
-  filenames, plus how to fix it (rename, use sub-folders, or `MATCH_MODE = "all"`).
-| `ALLOW_SINGLE_LETTER_SUFFIX` | Honour suffixes like `wood_D`, `wood_N`, `wood_R`. |
-
-The `CHANNEL_KEYWORDS` table maps file-name tokens to channels — extend it to
-match your studio's naming.
+If nothing matches, the log lists your material names and a few example
+filenames, plus how to fix it.
 
 ## Supported channels
 
@@ -93,8 +60,9 @@ reflectance layer.
 ## Notes & limitations
 
 - Targets the **classic material** (`c4d.Mmaterial`) — what the OBJ/MTL
-  importer creates. Redshift / node materials are skipped with a message.
+  importer creates. Octane / Redshift / node materials are skipped with a note.
 - Roughness / glossiness / metalness have no plain bitmap slot in the classic
-  Reflectance UI, so they are **detected and reported for manual hookup**
-  rather than guessed at. Reflection-colour maps are wired automatically.
-- Every run is wrapped in a single undo step, so `Ctrl+Z` reverts it.
+  Reflectance UI, so they're **detected and reported for manual hookup** rather
+  than guessed at. Reflection-colour maps are wired automatically.
+- The whole run (import + linking) is one undo step — `Ctrl+Z` reverts it.
+- Edit the `CHANNEL_KEYWORDS` table near the top to match your studio's naming.
