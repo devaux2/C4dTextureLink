@@ -91,3 +91,36 @@ reflectance layer.
   than guessed at. Reflection-colour maps are wired automatically.
 - The whole run (import + linking) is one undo step — `Ctrl+Z` reverts it.
 - Edit the `CHANNEL_KEYWORDS` table near the top to match your studio's naming.
+
+---
+
+# Companion tools
+
+## Octane Universal linking
+
+`texture_tool.py` targets standard C4D materials. For an **Octane** scene use:
+
+- **`octane_inspector.py`** — run once to dump your Octane build's parameter
+  IDs (the linker was built against Octane 2025; re-run if yours differs).
+- **`octane_texture_linker.py`** — converts the scene's standard materials to
+  **Octane Universal** materials and wires the matching textures.
+
+Workflow:
+
+1. Create one Octane **Universal** material in the scene as a template (the
+   linker clones it, so all Universal/BSDF/node-space defaults are correct for
+   your version — no guessing).
+2. Run `octane_texture_linker.py`, pick the texture folder, optionally **Dry
+   run** to preview, then **Run**. For each standard material it builds an
+   Octane Universal material, wires matching maps (Diffuse, Specular,
+   Roughness, Metallic, Reflection, Bump, Normal, Displacement, Opacity,
+   Transmission, Emission), copies the base colour, and swaps it onto the
+   objects that used the standard material. One undo step.
+
+## Deduplicate into instances
+
+`mesh_instancer.py` finds objects with identical geometry, keeps one master,
+and replaces the rest with **Render Instances** at the same transform — a big
+RAM/render win when the same prop is imported many times. **Analyze** reports
+the duplicate groups and how many objects would be removed; **Convert** does it
+(one undo step). Positions/rotations/scale are preserved.
