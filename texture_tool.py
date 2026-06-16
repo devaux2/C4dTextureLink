@@ -86,7 +86,8 @@ class Options(object):
         self.textures_folder = ""
         self.recursive_objects = False
         self.recursive_textures = True
-        self.spread = True
+        self.group = True               # parent similar files under a Null
+        self.spread = False             # off: keep original OBJ positions
         self.match_mode = "auto"        # "auto" | "name" | "all"
         self.allow_single_letter = True
         self.dry_run = False
@@ -121,6 +122,45 @@ def gather_files(folder, extensions, recursive):
                     and os.path.splitext(f)[1].lower() in extensions):
                 found.append((full, f))
     return found
+
+
+def group_key(path):
+    """Derive a grouping key from a file name by dropping trailing
+    numbers/variant suffixes:  tree008 -> tree,  rock_02b -> rock,
+    greevil_egg_001 -> greevil_egg."""
+    base = os.path.splitext(os.path.basename(path))[0]
+    key = re.sub(r"[ _\-.]*\d+[a-z]?$", "", base, flags=re.IGNORECASE)
+    key = re.sub(r"[ _\-.]+$", "", key)
+    return key if key else base
+
+
+def build_import_plan(paths, do_group):
+    """Turn [(full, rel), ...] into an ordered import plan.
+
+    Returns (plan, grouped, singles) where:
+      plan    = [(group_name_or_None, full_path), ...] in import order
+      grouped = [(group_name, count), ...] for groups of 2+ files
+      singles = number of files imported on their own (no group)
+    """
+    groups = {}
+    for full, _rel in paths:
+        k = group_key(full)
+        g = groups.setdefault(k.lower(), {"name": k, "files": []})
+        g["files"].append(full)
+
+    plan, grouped, singles = [], [], 0
+    for kl in sorted(groups):
+        g = groups[kl]
+        files = sorted(g["files"])
+        if do_group and len(files) >= 2:
+            for f in files:
+                plan.append((g["name"], f))
+            grouped.append((g["name"], len(files)))
+        else:
+            for f in files:
+                plan.append((None, f))
+            singles += len(files)
+    return plan, grouped, singles
 
 
 def detect_channel(file_path, allow_single_letter):
@@ -326,48 +366,66 @@ def decide_match_all(opts, classic_count):
     return classic_count == 1  # auto
 
 
-def merge_one(doc, full, opts, offset_index, log):
-    """Merge a single 3D file into doc. Returns (ok, new_offset_index)."""
+def merge_collect(doc, full, log):
+    """Merge one file into doc. Returns (ok, [new top-level objects])."""
     flags = (c4d.SCENEFILTER_OBJECTS | c4d.SCENEFILTER_MATERIALS
              | c4d.SCENEFILTER_MERGESCENE)
 
     # c4d.BaseObject is unhashable, so diff by id(). Keep references in
-    # `before_objs` so the wrappers (and thus their ids) stay valid.
-    before_objs = []
+    # `keep` so the wrappers (and thus their ids) stay valid.
+    keep = []
     before_ids = set()
     obj = doc.GetFirstObject()
     while obj:
-        before_objs.append(obj)
+        keep.append(obj)
         before_ids.add(id(obj))
         obj = obj.GetNext()
 
     if not documents.MergeDocument(doc, full, flags):
         log("   ! failed to import: %s" % os.path.basename(full))
-        return False, offset_index
+        return False, []
 
-    new_roots = []
+    roots = []
     obj = doc.GetFirstObject()
     while obj:
         if id(obj) not in before_ids:
-            new_roots.append(obj)
+            roots.append(obj)
         obj = obj.GetNext()
 
-    if opts.spread and new_roots:
-        offset_index += 1
-
-    for root in new_roots:
-        if opts.spread:
-            pos = root.GetRelPos()
-            pos.x += (offset_index - 1) * SPREAD_SPACING
-            root.SetRelPos(pos)
-        # UNDOTYPE_NEW is cheap (no geometry copy) and makes the merge
-        # undoable; UNDOTYPE_CHANGE would snapshot the whole mesh and can
-        # balloon RAM into the tens of GB on heavy scenes.
-        doc.AddUndo(c4d.UNDOTYPE_NEW, root)
-
     log("   [ok] %s  (%d object(s))"
-        % (os.path.basename(full), len(new_roots)))
-    return True, offset_index
+        % (os.path.basename(full), len(roots)))
+    return True, roots
+
+
+def make_group_null(doc, name):
+    """Create a named Null at the origin (identity) and insert it."""
+    null = c4d.BaseObject(c4d.Onull)
+    null.SetName(name)
+    doc.InsertObject(null)
+    doc.AddUndo(c4d.UNDOTYPE_NEW, null)
+    return null
+
+
+def place_roots(doc, roots, group_null, opts, offset_index):
+    """Parent/position freshly merged objects. Returns new offset_index.
+
+    Grouping preserves each object's *world* transform (so the OBJ's original
+    position/scale is untouched). Spread is opt-in and only moves ungrouped
+    objects. UNDOTYPE_NEW keeps it undoable without snapshotting geometry.
+    """
+    moved = False
+    for root in roots:
+        if group_null is not None:
+            mg = root.GetMg()            # remember world transform
+            root.InsertUnder(group_null)
+            root.SetMg(mg)               # restore it after re-parenting
+        elif opts.spread:
+            pos = root.GetRelPos()
+            pos.x += offset_index * SPREAD_SPACING
+            root.SetRelPos(pos)
+            moved = True
+        doc.AddUndo(c4d.UNDOTYPE_NEW, root)
+    return offset_index + 1 if moved else offset_index
 
 
 def import_objects(doc, opts, log, progress=None):
@@ -378,14 +436,21 @@ def import_objects(doc, opts, log, progress=None):
         log("No importable 3D files found in: %s" % opts.objects_folder)
         return 0
 
+    plan, _grouped, _singles = build_import_plan(paths, opts.group)
+    nulls = {}
     imported = 0
     offset_index = 0
-    for i, (full, _rel) in enumerate(paths):
+    for i, (gname, full) in enumerate(plan):
         if progress:
-            progress(i, len(paths), "Importing " + os.path.basename(full))
-        ok, offset_index = merge_one(doc, full, opts, offset_index, log)
+            progress(i, len(plan), "Importing " + os.path.basename(full))
+        null = None
+        if gname is not None:
+            null = nulls.get(gname) or make_group_null(doc, gname)
+            nulls[gname] = null
+        ok, roots = merge_collect(doc, full, log)
         if ok:
             imported += 1
+        offset_index = place_roots(doc, roots, null, opts, offset_index)
     return imported
 
 
@@ -443,6 +508,8 @@ G_CANCEL = 1013
 G_CLOSE = 1014
 G_LOG = 1015
 G_PROG = 1016
+G_GROUP = 1017
+G_PREVIEW = 1018
 
 MATCH_AUTO = 0
 MATCH_NAME = 1
@@ -533,13 +600,16 @@ class TextureToolDialog(gui.GeDialog):
         self.GroupEnd()
 
         self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
+        self.AddCheckbox(G_GROUP, c4d.BFH_LEFT, 0, 0,
+                         "Group similar objects under Nulls")
         self.AddCheckbox(G_DRYRUN, c4d.BFH_LEFT, 0, 0,
                          "Dry run (link preview)")
         self.AddCheckbox(G_OVERWRITE, c4d.BFH_LEFT, 0, 0,
                          "Overwrite existing")
         self.AddCheckbox(G_REC_TEX, c4d.BFH_LEFT, 0, 0, "Recurse textures")
         self.AddCheckbox(G_REC_OBJ, c4d.BFH_LEFT, 0, 0, "Recurse objects")
-        self.AddCheckbox(G_SPREAD, c4d.BFH_LEFT, 0, 0, "Spread imports")
+        self.AddCheckbox(G_SPREAD, c4d.BFH_LEFT, 0, 0,
+                         "Spread apart (moves objects)")
         self.GroupEnd()
 
         self.AddSeparatorH(0)
@@ -554,7 +624,8 @@ class TextureToolDialog(gui.GeDialog):
             c4d.DR_MULTILINE_READONLY | c4d.DR_MULTILINE_MONOSPACED)
 
         # Buttons
-        self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
+        self.GroupBegin(0, c4d.BFH_SCALEFIT, 4, 0, "")
+        self.AddButton(G_PREVIEW, c4d.BFH_LEFT, 120, 0, "Preview groups")
         self.AddButton(G_RUN, c4d.BFH_LEFT, 110, 0, "Run")
         self.AddButton(G_CANCEL, c4d.BFH_LEFT, 90, 0, "Cancel")
         self.AddButton(G_CLOSE, c4d.BFH_RIGHT, 90, 0, "Close")
@@ -569,7 +640,8 @@ class TextureToolDialog(gui.GeDialog):
         self.SetBool(G_OVERWRITE, False)
         self.SetBool(G_REC_TEX, True)
         self.SetBool(G_REC_OBJ, False)
-        self.SetBool(G_SPREAD, True)
+        self.SetBool(G_GROUP, True)
+        self.SetBool(G_SPREAD, False)  # keep original OBJ positions by default
         self.SetInt32(G_MATCH, MATCH_AUTO)
         self._enable_import_fields()
         self.Enable(G_CANCEL, False)
@@ -583,6 +655,8 @@ class TextureToolDialog(gui.GeDialog):
         self.Enable(G_OBJ_BROWSE, on)
         self.Enable(G_REC_OBJ, on)
         self.Enable(G_SPREAD, on)
+        self.Enable(G_GROUP, on)
+        self.Enable(G_PREVIEW, on)
 
     def _log(self, line):
         self._loglines.append(line)
@@ -597,6 +671,7 @@ class TextureToolDialog(gui.GeDialog):
         opts.textures_folder = self.GetString(G_TEX_FOLDER).strip()
         opts.recursive_objects = self.GetBool(G_REC_OBJ)
         opts.recursive_textures = self.GetBool(G_REC_TEX)
+        opts.group = self.GetBool(G_GROUP)
         opts.spread = self.GetBool(G_SPREAD)
         opts.dry_run = self.GetBool(G_DRYRUN)
         opts.overwrite = self.GetBool(G_OVERWRITE)
@@ -608,7 +683,7 @@ class TextureToolDialog(gui.GeDialog):
     def _update_progress(self):
         i, n = 0, 0
         if self._phase == "import":
-            i, n = self._idx, len(self._import_paths)
+            i, n = self._idx, len(self._import_plan)
         elif self._phase == "link":
             i, n = self._idx, len(self._materials)
         frac = (float(i) / n) if n else (1.0 if self._phase == "finish"
@@ -631,6 +706,8 @@ class TextureToolDialog(gui.GeDialog):
                                       flags=c4d.FILESELECT_DIRECTORY)
             if path:
                 self.SetString(G_TEX_FOLDER, path)
+        elif cid == G_PREVIEW:
+            self._preview_groups()
         elif cid == G_RUN:
             self._start()
         elif cid == G_CANCEL:
@@ -650,6 +727,31 @@ class TextureToolDialog(gui.GeDialog):
             return True  # abort the close for now
         return False
 
+    # --- grouping preview -------------------------------------------------
+    def _plan_summary_lines(self, grouped, singles, total):
+        lines = ["%d file(s): %d group(s), %d ungrouped."
+                 % (total, len(grouped), singles)]
+        for name, count in grouped[:20]:
+            lines.append("   %s  (%d)" % (name, count))
+        if len(grouped) > 20:
+            lines.append("   ... and %d more group(s)" % (len(grouped) - 20))
+        return lines
+
+    def _preview_groups(self):
+        folder = self.GetString(G_OBJ_FOLDER).strip()
+        if not folder or not os.path.isdir(folder):
+            self.SetString(G_LOG, "Choose a valid OBJECTS folder to preview.")
+            return
+        paths = gather_files(folder, OBJECT_EXTENSIONS,
+                             self.GetBool(G_REC_OBJ))
+        if not paths:
+            self.SetString(G_LOG, "No importable 3D files found.")
+            return
+        _plan, grouped, singles = build_import_plan(paths, self.GetBool(G_GROUP))
+        self._loglines = ["Group preview (nothing imported yet):", ""]
+        self._loglines += self._plan_summary_lines(grouped, singles, len(paths))
+        self.SetString(G_LOG, "\n".join(self._loglines))
+
     # --- run pipeline incrementally on the timer --------------------------
     def _start(self):
         opts = self._read_options()
@@ -667,6 +769,23 @@ class TextureToolDialog(gui.GeDialog):
             self.SetString(G_LOG, "No active document.")
             return
 
+        # Build the import plan first so we can confirm grouping up front.
+        self._import_plan = []
+        if opts.do_import:
+            paths = gather_files(opts.objects_folder, OBJECT_EXTENSIONS,
+                                 opts.recursive_objects)
+            if not paths:
+                self.SetString(G_LOG, "No importable 3D files found.")
+                return
+            plan, grouped, singles = build_import_plan(paths, opts.group)
+            if opts.group:
+                summary = "\n".join(
+                    self._plan_summary_lines(grouped, singles, len(paths)))
+                if not gui.QuestionDialog(
+                        "Import and organise these?\n\n" + summary):
+                    return
+            self._import_plan = plan
+
         self._opts = opts
         self._loglines = []
         self._cancel = False
@@ -675,23 +794,16 @@ class TextureToolDialog(gui.GeDialog):
         self._imported_count = 0
         self._assigned_total = 0
         self._last_event = 0
+        self._group_nulls = {}
         self._cur_label = "Starting..."
 
         self._doc.StartUndo()
-        if opts.do_import:
-            self._import_paths = gather_files(opts.objects_folder,
-                                              OBJECT_EXTENSIONS,
-                                              opts.recursive_objects)
+        if opts.do_import and self._import_plan:
             self._log("=" * 58)
             self._log("IMPORT  (%s)" % opts.objects_folder)
-            if not self._import_paths:
-                self._log("No importable 3D files found.")
-                self._phase = "linkprep"
-            else:
-                self._log("%d file(s) to import." % len(self._import_paths))
-                self._phase = "import"
+            self._log("%d file(s) to import." % len(self._import_plan))
+            self._phase = "import"
         else:
-            self._import_paths = []
             self._phase = "linkprep"
 
         self._running = True
@@ -704,18 +816,26 @@ class TextureToolDialog(gui.GeDialog):
         ph = self._phase
 
         if ph == "import":
-            if self._idx < len(self._import_paths):
-                full, _rel = self._import_paths[self._idx]
+            if self._idx < len(self._import_plan):
+                gname, full = self._import_plan[self._idx]
                 self._cur_label = "Importing %d/%d  %s" % (
-                    self._idx + 1, len(self._import_paths),
+                    self._idx + 1, len(self._import_plan),
                     os.path.basename(full))
-                ok, self._offset_index = merge_one(
-                    self._doc, full, self._opts, self._offset_index, self._log)
+                null = None
+                if gname is not None:
+                    null = self._group_nulls.get(gname)
+                    if null is None:
+                        null = make_group_null(self._doc, gname)
+                        self._group_nulls[gname] = null
+                ok, roots = merge_collect(self._doc, full, self._log)
                 if ok:
                     self._imported_count += 1
+                self._offset_index = place_roots(
+                    self._doc, roots, null, self._opts, self._offset_index)
                 self._idx += 1
             else:
-                self._log("Imported %d file(s)." % self._imported_count)
+                self._log("Imported %d file(s) into %d group(s)."
+                          % (self._imported_count, len(self._group_nulls)))
                 self._phase = "linkprep"
             return False
 

@@ -27,13 +27,25 @@ Cinema 4D → **Script Manager** (`Shift+F11`) → open `texture_tool.py` →
 | --- | --- |
 | **Import objects** | When ticked, every importable file in the *Objects folder* is merged into the scene first. Untick to only link textures to existing materials. |
 | **Objects / Texture folder** | Pick with **Browse…** |
+| **Group similar objects under Nulls** | Parent files with a shared base name (e.g. `tree008`, `tree009` → group `tree`) under a named Null, so the scene is organised. Object positions/scale are preserved exactly. |
 | **Match mode** | How files are matched to materials (see below). |
 | **Dry run** | Preview only — logs what *would* be wired up without changing anything. Run this first. |
 | **Overwrite existing** | Replace a channel that already has a shader. |
 | **Recurse textures / objects** | Search sub-folders. |
-| **Spread imports** | Offset each imported file along X so they don't pile up at the origin. |
+| **Spread apart (moves objects)** | *Off by default.* Offsets each group/file along X. Leave off to keep the OBJ's original positions. |
+| **Preview groups** | Show the proposed grouping without importing anything. |
 | **Run** | Do it. The progress bar and log update live; C4D stays usable. |
 | **Cancel** | Stop a running job cleanly (the partial result is still undoable). |
+
+### Grouping
+
+When **Group similar objects under Nulls** is on, the tool first works out which
+files belong together by stripping trailing numbers/variants from the file name
+(`tree008` → `tree`), shows you the proposed groups, and asks for confirmation
+before importing. Each group's objects are parented under a Null named after the
+group. **Positions and scale from the OBJ are preserved** — grouping only
+re-parents (the world transform is restored after re-parenting); it never moves
+or rescales anything. Use **Preview groups** to see the plan first.
 
 ## How files are matched to materials
 
