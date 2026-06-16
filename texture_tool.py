@@ -282,12 +282,7 @@ def link_all(doc, opts, log, progress=None):
         return 0
 
     classic = [m for m in materials if m.GetType() == c4d.Mmaterial]
-    if opts.match_mode == "all":
-        match_all = True
-    elif opts.match_mode == "name":
-        match_all = False
-    else:  # auto
-        match_all = (len(classic) == 1)
+    match_all = decide_match_all(opts, len(classic))
 
     log("Images found: %d   Materials: %d (%d classic)   Match: %s"
         % (len(textures), len(materials), len(classic),
@@ -321,6 +316,54 @@ def link_all(doc, opts, log, progress=None):
     return total
 
 
+def decide_match_all(opts, classic_count):
+    """Resolve the effective match mode to a simple boolean."""
+    if opts.match_mode == "all":
+        return True
+    if opts.match_mode == "name":
+        return False
+    return classic_count == 1  # auto
+
+
+def merge_one(doc, full, opts, offset_index, log):
+    """Merge a single 3D file into doc. Returns (ok, new_offset_index)."""
+    flags = (c4d.SCENEFILTER_OBJECTS | c4d.SCENEFILTER_MATERIALS
+             | c4d.SCENEFILTER_MERGESCENE)
+
+    # c4d.BaseObject is unhashable, so diff by id(). Keep references in
+    # `before_objs` so the wrappers (and thus their ids) stay valid.
+    before_objs = []
+    before_ids = set()
+    obj = doc.GetFirstObject()
+    while obj:
+        before_objs.append(obj)
+        before_ids.add(id(obj))
+        obj = obj.GetNext()
+
+    if not documents.MergeDocument(doc, full, flags):
+        log("   ! failed to import: %s" % os.path.basename(full))
+        return False, offset_index
+
+    new_roots = []
+    obj = doc.GetFirstObject()
+    while obj:
+        if id(obj) not in before_ids:
+            new_roots.append(obj)
+        obj = obj.GetNext()
+
+    if opts.spread and new_roots:
+        for root in new_roots:
+            doc.AddUndo(c4d.UNDOTYPE_CHANGE, root)
+            pos = root.GetRelPos()
+            pos.x += offset_index * SPREAD_SPACING
+            root.SetRelPos(pos)
+        offset_index += 1
+
+    log("   [ok] %s  (%d object(s))"
+        % (os.path.basename(full), len(new_roots)))
+    return True, offset_index
+
+
 def import_objects(doc, opts, log, progress=None):
     """Merge every importable file in the objects folder. Returns count."""
     paths = gather_files(opts.objects_folder, OBJECT_EXTENSIONS,
@@ -329,48 +372,14 @@ def import_objects(doc, opts, log, progress=None):
         log("No importable 3D files found in: %s" % opts.objects_folder)
         return 0
 
-    flags = (c4d.SCENEFILTER_OBJECTS | c4d.SCENEFILTER_MATERIALS
-             | c4d.SCENEFILTER_MERGESCENE)
     imported = 0
     offset_index = 0
-
     for i, (full, _rel) in enumerate(paths):
         if progress:
             progress(i, len(paths), "Importing " + os.path.basename(full))
-
-        # c4d.BaseObject is unhashable, so diff by id(). We keep references in
-        # `before_objs` so the wrappers (and thus their ids) stay valid.
-        before_objs = []
-        before_ids = set()
-        obj = doc.GetFirstObject()
-        while obj:
-            before_objs.append(obj)
-            before_ids.add(id(obj))
-            obj = obj.GetNext()
-
-        if not documents.MergeDocument(doc, full, flags):
-            log("   ! failed to import: %s" % os.path.basename(full))
-            continue
-
-        new_roots = []
-        obj = doc.GetFirstObject()
-        while obj:
-            if id(obj) not in before_ids:
-                new_roots.append(obj)
-            obj = obj.GetNext()
-
-        if opts.spread and new_roots:
-            for root in new_roots:
-                doc.AddUndo(c4d.UNDOTYPE_CHANGE, root)
-                pos = root.GetRelPos()
-                pos.x += offset_index * SPREAD_SPACING
-                root.SetRelPos(pos)
-            offset_index += 1
-
-        imported += 1
-        log("   [ok] %s  (%d object(s))"
-            % (os.path.basename(full), len(new_roots)))
-
+        ok, offset_index = merge_one(doc, full, opts, offset_index, log)
+        if ok:
+            imported += 1
     return imported
 
 
@@ -424,12 +433,52 @@ G_OVERWRITE = 1009
 G_SPREAD = 1010
 G_REC_OBJ = 1011
 G_RUN = 1012
-G_CLOSE = 1013
-G_LOG = 1014
+G_CANCEL = 1013
+G_CLOSE = 1014
+G_LOG = 1015
+G_PROG = 1016
 
 MATCH_AUTO = 0
 MATCH_NAME = 1
 MATCH_ALL = 2
+
+# Milliseconds of work per Timer tick before yielding back to the UI.
+TICK_BUDGET_MS = 50
+
+_dialog = None  # keep the async dialog alive
+
+
+class ProgressArea(gui.GeUserArea):
+    """A simple horizontal progress bar drawn in the dialog."""
+
+    def __init__(self):
+        super(ProgressArea, self).__init__()
+        self.percent = 0.0
+        self.label = ""
+
+    def GetMinSize(self):
+        return (220, 18)
+
+    def set(self, percent, label):
+        self.percent = max(0.0, min(1.0, percent))
+        self.label = label
+        self.Redraw()
+
+    def DrawMsg(self, x1, y1, x2, y2, msg):
+        self.OffScreenOn()
+        w = x2 - x1 + 1
+        # track
+        self.DrawSetPen(c4d.Vector(0.16, 0.16, 0.16))
+        self.DrawRectangle(x1, y1, x2, y2)
+        # fill
+        fill = int(w * self.percent)
+        if fill > 0:
+            self.DrawSetPen(c4d.Vector(0.26, 0.55, 0.9))
+            self.DrawRectangle(x1, y1, x1 + fill, y2)
+        # text
+        self.DrawSetTextCol(c4d.Vector(1.0), c4d.COLOR_TRANS)
+        self.DrawText("%d%%  %s" % (int(self.percent * 100), self.label),
+                      x1 + 5, y1 + 1)
 
 
 class TextureToolDialog(gui.GeDialog):
@@ -437,6 +486,10 @@ class TextureToolDialog(gui.GeDialog):
     def __init__(self):
         super(TextureToolDialog, self).__init__()
         self._loglines = []
+        self._prog = ProgressArea()
+        self._running = False
+        self._cancel = False
+        self._cur_label = ""
 
     # --- layout -----------------------------------------------------------
     def CreateLayout(self):
@@ -475,7 +528,7 @@ class TextureToolDialog(gui.GeDialog):
 
         self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
         self.AddCheckbox(G_DRYRUN, c4d.BFH_LEFT, 0, 0,
-                         "Dry run (preview only)")
+                         "Dry run (link preview)")
         self.AddCheckbox(G_OVERWRITE, c4d.BFH_LEFT, 0, 0,
                          "Overwrite existing")
         self.AddCheckbox(G_REC_TEX, c4d.BFH_LEFT, 0, 0, "Recurse textures")
@@ -485,14 +538,19 @@ class TextureToolDialog(gui.GeDialog):
 
         self.AddSeparatorH(0)
 
+        # Progress bar
+        self.AddUserArea(G_PROG, c4d.BFH_SCALEFIT, 0, 18)
+        self.AttachUserArea(self._prog, G_PROG)
+
         # Log
         self.AddMultiLineEditText(
-            G_LOG, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 0, 220,
+            G_LOG, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 0, 200,
             c4d.DR_MULTILINE_READONLY | c4d.DR_MULTILINE_MONOSPACED)
 
         # Buttons
-        self.GroupBegin(0, c4d.BFH_SCALEFIT, 2, 0, "")
+        self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
         self.AddButton(G_RUN, c4d.BFH_LEFT, 110, 0, "Run")
+        self.AddButton(G_CANCEL, c4d.BFH_LEFT, 90, 0, "Cancel")
         self.AddButton(G_CLOSE, c4d.BFH_RIGHT, 90, 0, "Close")
         self.GroupEnd()
 
@@ -508,6 +566,7 @@ class TextureToolDialog(gui.GeDialog):
         self.SetBool(G_SPREAD, True)
         self.SetInt32(G_MATCH, MATCH_AUTO)
         self._enable_import_fields()
+        self.Enable(G_CANCEL, False)
         self.SetString(G_LOG, "Pick your folder(s), then press Run.")
         return True
 
@@ -521,7 +580,6 @@ class TextureToolDialog(gui.GeDialog):
 
     def _log(self, line):
         self._loglines.append(line)
-        # Keep the box from growing unbounded on huge scenes.
         if len(self._loglines) > 4000:
             self._loglines = self._loglines[-4000:]
         self.SetString(G_LOG, "\n".join(self._loglines))
@@ -541,69 +599,236 @@ class TextureToolDialog(gui.GeDialog):
                            MATCH_ALL: "all"}.get(sel, "auto")
         return opts
 
-    def _progress(self, i, n, label):
-        pct = int(100.0 * i / n) if n else 0
-        c4d.StatusSetText(label)
-        c4d.StatusSetBar(pct)
+    def _update_progress(self):
+        i, n = 0, 0
+        if self._phase == "import":
+            i, n = self._idx, len(self._import_paths)
+        elif self._phase == "link":
+            i, n = self._idx, len(self._materials)
+        frac = (float(i) / n) if n else (1.0 if self._phase == "finish"
+                                         else 0.0)
+        self._prog.set(frac, self._cur_label)
+        c4d.StatusSetText(self._cur_label)
+        c4d.StatusSetBar(int(frac * 100))
 
     # --- events -----------------------------------------------------------
     def Command(self, cid, msg):
         if cid == G_IMPORT:
             self._enable_import_fields()
-
         elif cid == G_OBJ_BROWSE:
             path = storage.LoadDialog(title="Select the OBJECTS folder",
                                       flags=c4d.FILESELECT_DIRECTORY)
             if path:
                 self.SetString(G_OBJ_FOLDER, path)
-
         elif cid == G_TEX_BROWSE:
             path = storage.LoadDialog(title="Select the TEXTURE folder",
                                       flags=c4d.FILESELECT_DIRECTORY)
             if path:
                 self.SetString(G_TEX_FOLDER, path)
-
         elif cid == G_RUN:
-            self._run()
-
+            self._start()
+        elif cid == G_CANCEL:
+            if self._running:
+                self._cancel = True
         elif cid == G_CLOSE:
-            self.Close()
-
+            if self._running:
+                self._cancel = True  # finish cleanly, then it can be closed
+            else:
+                self.Close()
         return True
 
-    def _run(self):
-        opts = self._read_options()
-        self._loglines = []
+    def AskClose(self):
+        # Block closing mid-run so the undo block stays balanced.
+        if self._running:
+            self._cancel = True
+            return True  # abort the close for now
+        return False
 
-        # Validate before touching anything.
+    # --- run pipeline incrementally on the timer --------------------------
+    def _start(self):
+        opts = self._read_options()
         if not opts.textures_folder or not os.path.isdir(opts.textures_folder):
-            self._log("Please choose a valid TEXTURE folder.")
+            self.SetString(G_LOG, "Please choose a valid TEXTURE folder.")
             return
         if opts.do_import and (not opts.objects_folder
                                or not os.path.isdir(opts.objects_folder)):
-            self._log("Please choose a valid OBJECTS folder "
-                      "(or turn off 'Import objects').")
+            self.SetString(G_LOG, "Please choose a valid OBJECTS folder "
+                                  "(or turn off 'Import objects').")
             return
 
+        self._doc = documents.GetActiveDocument()
+        if self._doc is None:
+            self.SetString(G_LOG, "No active document.")
+            return
+
+        self._opts = opts
+        self._loglines = []
+        self._cancel = False
+        self._idx = 0
+        self._offset_index = 0
+        self._imported_count = 0
+        self._assigned_total = 0
+        self._cur_label = "Starting..."
+
+        self._doc.StartUndo()
+        if opts.do_import:
+            self._import_paths = gather_files(opts.objects_folder,
+                                              OBJECT_EXTENSIONS,
+                                              opts.recursive_objects)
+            self._log("=" * 58)
+            self._log("IMPORT  (%s)" % opts.objects_folder)
+            if not self._import_paths:
+                self._log("No importable 3D files found.")
+                self._phase = "linkprep"
+            else:
+                self._log("%d file(s) to import." % len(self._import_paths))
+                self._phase = "import"
+        else:
+            self._import_paths = []
+            self._phase = "linkprep"
+
+        self._running = True
         self.Enable(G_RUN, False)
-        c4d.StatusSetText("Working...")
-        c4d.StatusSetBar(1)
+        self.Enable(G_CANCEL, True)
+        self.SetTimer(20)
+
+    def _step(self):
+        """Do one unit of work; return True when everything is finished."""
+        ph = self._phase
+
+        if ph == "import":
+            if self._idx < len(self._import_paths):
+                full, _rel = self._import_paths[self._idx]
+                self._cur_label = "Importing %d/%d  %s" % (
+                    self._idx + 1, len(self._import_paths),
+                    os.path.basename(full))
+                ok, self._offset_index = merge_one(
+                    self._doc, full, self._opts, self._offset_index, self._log)
+                if ok:
+                    self._imported_count += 1
+                self._idx += 1
+            else:
+                self._log("Imported %d file(s)." % self._imported_count)
+                self._phase = "linkprep"
+            return False
+
+        if ph == "linkprep":
+            self._log("")
+            self._log("=" * 58)
+            self._log("LINK TEXTURES  (%s)%s" % (
+                self._opts.textures_folder,
+                "  [DRY RUN]" if self._opts.dry_run else ""))
+            self._textures = gather_files(self._opts.textures_folder,
+                                          IMAGE_EXTENSIONS,
+                                          self._opts.recursive_textures)
+            self._materials = self._doc.GetMaterials()
+            self._classic = [m for m in self._materials
+                             if m.GetType() == c4d.Mmaterial]
+            self._match_all = decide_match_all(self._opts, len(self._classic))
+            self._channel_table = _channel_table()
+            self._log("Images: %d   Materials: %d (%d classic)   Match: %s"
+                      % (len(self._textures), len(self._materials),
+                         len(self._classic),
+                         "all" if self._match_all else "by name"))
+            self._log("-" * 58)
+            self._idx = 0
+            if not self._textures:
+                self._log("No image files found in the texture folder.")
+                self._phase = "finish"
+            elif not self._materials:
+                self._log("The scene has no materials.")
+                self._phase = "finish"
+            else:
+                self._phase = "link"
+            return False
+
+        if ph == "link":
+            if self._idx < len(self._materials):
+                mat = self._materials[self._idx]
+                self._cur_label = "Linking %d/%d  %s" % (
+                    self._idx + 1, len(self._materials), mat.GetName())
+                if mat.GetType() != c4d.Mmaterial:
+                    self._log("Material: %s  (not a classic material -- "
+                              "skipped)" % mat.GetName())
+                    self._log("")
+                else:
+                    if not self._opts.dry_run:
+                        self._doc.AddUndo(c4d.UNDOTYPE_CHANGE, mat)
+                    self._assigned_total += process_material(
+                        mat, self._textures, self._channel_table,
+                        self._match_all, self._opts, self._log)
+                    self._log("")
+                self._idx += 1
+            else:
+                if (self._assigned_total == 0 and not self._match_all
+                        and self._classic):
+                    self._log("Nothing matched -- material names probably "
+                              "don't appear in the texture file names.")
+                    self._log("Materials: %s" % ", ".join(
+                        m.GetName() for m in self._classic[:12]))
+                    self._log("Examples:  %s" % ", ".join(
+                        os.path.basename(p) for p, _ in self._textures[:6]))
+                    self._log("Fix: rename files to include the material "
+                              "name, use per-material sub-folders, or set "
+                              "Match mode = All files.")
+                self._phase = "finish"
+            return False
+
+        return True  # finish
+
+    def _finish(self):
+        if not self._running:
+            return
+        self._running = False
+        self.SetTimer(0)
         try:
-            run_pipeline(opts, self._log, self._progress)
+            self._doc.EndUndo()
+        except Exception:
+            pass
+        c4d.StatusClear()
+        c4d.EventAdd()
+        self._log("")
+        self._log("=" * 58)
+        state = "Cancelled" if self._cancel else "Done"
+        self._log("%s. Imported %d file(s); %d texture(s) %s." % (
+            state, self._imported_count, self._assigned_total,
+            "would be assigned" if self._opts.dry_run else "assigned"))
+        self._prog.set(self._prog.percent if self._cancel else 1.0,
+                       "Cancelled" if self._cancel else "Finished")
+        self.Enable(G_RUN, True)
+        self.Enable(G_CANCEL, False)
+        print("\n".join(self._loglines))
+
+    def Timer(self, msg):
+        if not self._running:
+            return
+        try:
+            if self._cancel:
+                self._log("Cancelling...")
+                self._finish()
+                return
+            start = c4d.GeGetMilliseconds()
+            done = False
+            while (c4d.GeGetMilliseconds() - start) < TICK_BUDGET_MS:
+                if self._step():
+                    done = True
+                    break
+            self._update_progress()
+            c4d.EventAdd()  # show imported objects / material changes live
+            if done:
+                self._finish()
         except Exception:
             self._log("")
             self._log("ERROR -- the run stopped:")
             self._log(traceback.format_exc())
-        finally:
-            c4d.StatusClear()
-            self.Enable(G_RUN, True)
-            # Echo to the console too, for good measure.
-            print("\n".join(self._loglines))
+            self._finish()
 
 
 def main():
-    dlg = TextureToolDialog()
-    dlg.Open(c4d.DLG_TYPE_MODAL_RESIZEABLE, defaultw=620, defaulth=560)
+    global _dialog
+    _dialog = TextureToolDialog()
+    # Async so C4D's viewport/status keep updating while it runs.
+    _dialog.Open(c4d.DLG_TYPE_ASYNC, defaultw=640, defaulth=600)
 
 
 if __name__ == "__main__":

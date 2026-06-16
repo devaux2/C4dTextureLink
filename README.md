@@ -11,8 +11,10 @@ Built for the "import a big OBJ + MTL group, then wire up all the PBR maps from
 another folder" workflow — without doing it by hand for every material.
 
 It opens a small dialog so you can **see it working**: folder pickers, options,
-a progress bar in C4D's status bar, and a live results log (errors show up in
-that log too, so it never silently does nothing).
+a **live progress bar**, and a results log that fills in as it runs (errors show
+up in that log too, so it never silently does nothing). The work runs
+incrementally, so **Cinema stays responsive** — objects appear in the viewport
+as they import, and a **Cancel** button stops a long job cleanly.
 
 ## How to run
 
@@ -30,7 +32,8 @@ Cinema 4D → **Script Manager** (`Shift+F11`) → open `texture_tool.py` →
 | **Overwrite existing** | Replace a channel that already has a shader. |
 | **Recurse textures / objects** | Search sub-folders. |
 | **Spread imports** | Offset each imported file along X so they don't pile up at the origin. |
-| **Run** | Do it. Progress shows in the status bar; results fill the log. |
+| **Run** | Do it. The progress bar and log update live; C4D stays usable. |
+| **Cancel** | Stop a running job cleanly (the partial result is still undoable). |
 
 ## How files are matched to materials
 
