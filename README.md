@@ -40,13 +40,22 @@ Cinema 4D → **Script Manager** (`Shift+F11`) → open `texture_tool.py` →
 ### Grouping
 
 When **Group each file's parts under a Null** is on, each file's imported
-objects are parented under a Null named after the file's **exact base name**.
-Numbers are kept, so `tree007` and `tree008` are separate Nulls (they're
-different models) — names are never stripped or merged. The tool shows the
-planned Nulls and asks for confirmation before importing. **Positions and scale
+objects are parented under a Null named after the file. The name is cleaned up:
+
+- **Common prefix stripped.** A shared prefix like `dota_d_` is removed. Leave
+  the **Strip prefix** field blank to auto-detect it, or type your own.
+- **Split parts merged.** `_<number>` suffixes that are split parts of one model
+  collapse onto their base: `campfire_rocks001`, `campfire_rocks001_1 … _4` all
+  go under **`campfire_rocks001`**. This only happens when the base is a real
+  sibling, so a model whose name genuinely ends in a number (e.g.
+  `bones_tintable_002`) is kept — and its part `bones_tintable_002_1` joins it.
+- **Attached numbers kept.** `tree007` and `tree008` are different models, so
+  they stay separate Nulls.
+
+The tool shows the planned Nulls and asks for confirmation before importing;
+**Preview groups** prints the full list without importing. **Positions and scale
 from the OBJ are preserved** — grouping only re-parents (the world transform is
-restored after re-parenting); it never moves or rescales anything. Use
-**Preview groups** to see the plan first.
+restored after re-parenting); it never moves or rescales anything.
 
 ## How files are matched to materials
 

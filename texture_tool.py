@@ -87,6 +87,7 @@ class Options(object):
         self.recursive_objects = False
         self.recursive_textures = True
         self.group = True               # parent similar files under a Null
+        self.strip_prefix = ""          # common name prefix to drop ("" = auto)
         self.spread = False             # off: keep original OBJ positions
         self.match_mode = "auto"        # "auto" | "name" | "all"
         self.allow_single_letter = True
@@ -124,27 +125,77 @@ def gather_files(folder, extensions, recursive):
     return found
 
 
-def group_key(path):
-    """Group key = the file's exact base name (no extension). Numbers are
-    KEPT, so tree007 and tree008 stay separate groups."""
+def file_base(path):
+    """The file's base name without extension."""
     return os.path.splitext(os.path.basename(path))[0]
 
 
-def build_import_plan(paths, do_group):
+def common_prefix(names):
+    """Longest shared prefix across names, trimmed to a separator boundary.
+    e.g. all 'dota_d_...' names -> 'dota_d_'. Returns '' if none."""
+    if len(names) < 2:
+        return ""
+    p = os.path.commonprefix([n.lower() for n in names])
+    idx = max(p.rfind(s) for s in ("_", "-", ".", " "))
+    if idx < 0:
+        return ""
+    return names[0][:idx + 1]
+
+
+def strip_name_prefix(base, strip_prefix):
+    """Drop a leading common prefix (e.g. 'dota_d_') from a base name."""
+    name = base
+    if strip_prefix and name.lower().startswith(strip_prefix.lower()):
+        name = name[len(strip_prefix):]
+    name = name.lstrip(" _-.")
+    return name if name else base
+
+
+def _collapse_part_suffixes(names):
+    """Map each name to its group name, collapsing '_<number>' split-part
+    suffixes onto a shared base -- but only when that base is a real sibling.
+
+      rocks001, rocks001_1, rocks001_2  -> all 'rocks001'
+      bones_002, bones_002_1            -> both 'bones_002'  (002 kept: it is
+                                           the model, _1 is the part)
+      blood001, blood002                -> stay separate (attached numbers)
+    """
+    base_set = set(n.lower() for n in names)
+    # How many names reduce to each candidate base (via one trailing _<num>)?
+    reduce_count = {}
+    cands = []
+    for n in names:
+        c = re.sub(r"_\d+$", "", n)
+        cands.append(c if c != n else None)
+        if c != n:
+            reduce_count[c.lower()] = reduce_count.get(c.lower(), 0) + 1
+
+    out = []
+    for n, c in zip(names, cands):
+        if c is not None and (c.lower() in base_set
+                              or reduce_count.get(c.lower(), 0) >= 2):
+            out.append(c)
+        else:
+            out.append(n)
+    return out
+
+
+def build_import_plan(paths, do_group, strip_prefix=""):
     """Turn [(full, rel), ...] into an ordered import plan.
 
     With grouping on, each file's objects go under a Null named after the
-    file (its base name). Returns (plan, groups) where:
+    file (after prefix and split-part cleanup). Returns (plan, groups) where:
       plan   = [(group_name_or_None, full_path), ...] in import order
-      groups = [(group_name, file_count), ...] (file_count > 1 only when
-               several files share the same base name)
+      groups = [(group_name, file_count), ...]
     """
     if not do_group:
         return [(None, full) for full, _rel in paths], []
 
+    bases = [strip_name_prefix(file_base(f), strip_prefix) for f, _ in paths]
+    names = _collapse_part_suffixes(bases)
+
     plan, order, counts = [], [], {}
-    for full, _rel in paths:
-        name = group_key(full)
+    for (full, _rel), name in zip(paths, names):
         plan.append((name, full))
         k = name.lower()
         if k not in counts:
@@ -428,7 +479,8 @@ def import_objects(doc, opts, log, progress=None):
         log("No importable 3D files found in: %s" % opts.objects_folder)
         return 0
 
-    plan, _groups = build_import_plan(paths, opts.group)
+    prefix = opts.strip_prefix or common_prefix([file_base(f) for f, _ in paths])
+    plan, _groups = build_import_plan(paths, opts.group, prefix)
     nulls = {}
     imported = 0
     offset_index = 0
@@ -502,6 +554,7 @@ G_LOG = 1015
 G_PROG = 1016
 G_GROUP = 1017
 G_PREVIEW = 1018
+G_PREFIX = 1019
 
 MATCH_AUTO = 0
 MATCH_NAME = 1
@@ -594,6 +647,8 @@ class TextureToolDialog(gui.GeDialog):
         self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
         self.AddCheckbox(G_GROUP, c4d.BFH_LEFT, 0, 0,
                          "Group each file's parts under a Null")
+        self.AddStaticText(0, c4d.BFH_RIGHT, 0, 0, "Strip prefix", 0)
+        self.AddEditText(G_PREFIX, c4d.BFH_SCALEFIT, 0, 0)
         self.AddCheckbox(G_DRYRUN, c4d.BFH_LEFT, 0, 0,
                          "Dry run (link preview)")
         self.AddCheckbox(G_OVERWRITE, c4d.BFH_LEFT, 0, 0,
@@ -633,6 +688,7 @@ class TextureToolDialog(gui.GeDialog):
         self.SetBool(G_REC_TEX, True)
         self.SetBool(G_REC_OBJ, False)
         self.SetBool(G_GROUP, True)
+        self.SetString(G_PREFIX, "")   # blank = auto-detect common prefix
         self.SetBool(G_SPREAD, False)  # keep original OBJ positions by default
         self.SetInt32(G_MATCH, MATCH_AUTO)
         self._enable_import_fields()
@@ -649,6 +705,7 @@ class TextureToolDialog(gui.GeDialog):
         self.Enable(G_SPREAD, on)
         self.Enable(G_GROUP, on)
         self.Enable(G_PREVIEW, on)
+        self.Enable(G_PREFIX, on)
 
     def _log(self, line):
         self._loglines.append(line)
@@ -664,6 +721,7 @@ class TextureToolDialog(gui.GeDialog):
         opts.recursive_objects = self.GetBool(G_REC_OBJ)
         opts.recursive_textures = self.GetBool(G_REC_TEX)
         opts.group = self.GetBool(G_GROUP)
+        opts.strip_prefix = self.GetString(G_PREFIX).strip()
         opts.spread = self.GetBool(G_SPREAD)
         opts.dry_run = self.GetBool(G_DRYRUN)
         opts.overwrite = self.GetBool(G_OVERWRITE)
@@ -720,15 +778,28 @@ class TextureToolDialog(gui.GeDialog):
         return False
 
     # --- grouping preview -------------------------------------------------
-    def _plan_summary_lines(self, groups, total):
-        lines = ["%d file(s)  ->  %d Null group(s) (named after each file):"
-                 % (total, len(groups)), ""]
-        for name, count in groups[:25]:
+    def _plan_summary_lines(self, groups, total, prefix, limit=None):
+        head = "%d file(s)  ->  %d Null group(s)" % (total, len(groups))
+        if prefix:
+            head += "   (stripping prefix '%s')" % prefix
+        lines = [head + ":", ""]
+        shown = groups if limit is None else groups[:limit]
+        for name, count in shown:
             suffix = "  (%d files)" % count if count > 1 else ""
             lines.append("   %s%s" % (name, suffix))
-        if len(groups) > 25:
-            lines.append("   ... and %d more" % (len(groups) - 25))
+        if limit is not None and len(groups) > limit:
+            lines.append("   ... and %d more (use 'Preview groups' for the "
+                         "full list)" % (len(groups) - limit))
         return lines
+
+    def _resolve_prefix(self, paths):
+        """Use the typed prefix, or auto-detect the common one and show it."""
+        prefix = self.GetString(G_PREFIX).strip()
+        if not prefix:
+            prefix = common_prefix([file_base(f) for f, _ in paths])
+            if prefix:
+                self.SetString(G_PREFIX, prefix)  # reflect what we detected
+        return prefix
 
     def _preview_groups(self):
         folder = self.GetString(G_OBJ_FOLDER).strip()
@@ -744,9 +815,10 @@ class TextureToolDialog(gui.GeDialog):
             self.SetString(G_LOG, "Grouping is off: %d file(s) import "
                                   "individually." % len(paths))
             return
-        _plan, groups = build_import_plan(paths, True)
+        prefix = self._resolve_prefix(paths)
+        _plan, groups = build_import_plan(paths, True, prefix)
         self._loglines = ["Group preview (nothing imported yet):", ""]
-        self._loglines += self._plan_summary_lines(groups, len(paths))
+        self._loglines += self._plan_summary_lines(groups, len(paths), prefix)
         self.SetString(G_LOG, "\n".join(self._loglines))
 
     # --- run pipeline incrementally on the timer --------------------------
@@ -774,10 +846,13 @@ class TextureToolDialog(gui.GeDialog):
             if not paths:
                 self.SetString(G_LOG, "No importable 3D files found.")
                 return
-            plan, groups = build_import_plan(paths, opts.group)
+            prefix = self._resolve_prefix(paths) if opts.group else ""
+            opts.strip_prefix = prefix
+            plan, groups = build_import_plan(paths, opts.group, prefix)
             if opts.group:
                 summary = "\n".join(
-                    self._plan_summary_lines(groups, len(paths)))
+                    self._plan_summary_lines(groups, len(paths), prefix,
+                                             limit=20))
                 if not gui.QuestionDialog(
                         "Import and organise these?\n\n" + summary):
                     return
