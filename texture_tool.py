@@ -25,6 +25,7 @@ Cinema 4D -> Script Manager (Shift+F11) -> open this file -> Execute.
 
 import os
 import re
+import time
 import traceback
 import c4d
 from c4d import gui, storage, documents
@@ -807,9 +808,9 @@ class TextureToolDialog(gui.GeDialog):
                 self._log("Cancelling...")
                 self._finish()
                 return
-            start = c4d.GeGetMilliseconds()
+            start = time.time()
             done = False
-            while (c4d.GeGetMilliseconds() - start) < TICK_BUDGET_MS:
+            while (time.time() - start) * 1000.0 < TICK_BUDGET_MS:
                 if self._step():
                     done = True
                     break
