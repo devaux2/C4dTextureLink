@@ -120,10 +120,14 @@ Workflow:
 Notes:
 
 - The template clone's placeholder textures are stripped before wiring, so the
-  **Diffuse map always loads** (it won't be skipped as "already connected").
-- Conversion runs **one scene group (Null) at a time**, refreshing Octane only
-  at each group boundary (and every few materials), so it streams textures in
-  chunks instead of compiling everything at once — which can crash Octane.
+  **Diffuse map always loads** (it won't be skipped as "already connected"),
+  and every present map — including **Roughness and Opacity** — is wired when a
+  matching file exists.
+- Conversion is a **manual stepper**: click **Start** to do the first scene
+  group (Null), check Octane is stable, then click **Next group** for the next,
+  and so on. Octane only ever loads one group's textures at a time, which
+  avoids the all-at-once compile that crashes it. **Cancel** stops cleanly;
+  it's one undo step.
 
 ## Deduplicate into instances
 

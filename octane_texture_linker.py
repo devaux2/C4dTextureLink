@@ -268,9 +268,6 @@ class ProgressArea(gui.GeUserArea):
 # ---------------------------------------------------------------------------
 
 TICK_BUDGET_MS = 50
-# Refresh Octane after at most this many new materials (and at every group
-# boundary), so it streams textures in chunks instead of all at once.
-EVENT_BATCH = 8
 
 G_TEX = 4001
 G_BROWSE = 4002
@@ -285,6 +282,7 @@ G_CANCEL = 4010
 G_CLOSE = 4011
 G_LOG = 4012
 G_PROG = 4013
+G_NEXT = 4014
 
 MATCH_AUTO, MATCH_NAME, MATCH_ALL = 0, 1, 2
 
@@ -296,7 +294,9 @@ class OctaneLinkerDialog(gui.GeDialog):
         super(OctaneLinkerDialog, self).__init__()
         self._loglines = []
         self._prog = ProgressArea()
-        self._running = False
+        self._running = False        # a timer-driven step is in progress
+        self._session = False        # a group-by-group conversion is underway
+        self._mode = None            # "dry" | "group"
         self._cancel = False
         self._cur = ""
 
@@ -335,10 +335,11 @@ class OctaneLinkerDialog(gui.GeDialog):
             G_LOG, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 0, 220,
             c4d.DR_MULTILINE_READONLY | c4d.DR_MULTILINE_MONOSPACED)
 
-        self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
-        self.AddButton(G_RUN, c4d.BFH_LEFT, 110, 0, "Run")
-        self.AddButton(G_CANCEL, c4d.BFH_LEFT, 90, 0, "Cancel")
-        self.AddButton(G_CLOSE, c4d.BFH_RIGHT, 90, 0, "Close")
+        self.GroupBegin(0, c4d.BFH_SCALEFIT, 4, 0, "")
+        self.AddButton(G_RUN, c4d.BFH_LEFT, 110, 0, "Start")
+        self.AddButton(G_NEXT, c4d.BFH_LEFT, 110, 0, "Next group")
+        self.AddButton(G_CANCEL, c4d.BFH_LEFT, 80, 0, "Cancel")
+        self.AddButton(G_CLOSE, c4d.BFH_RIGHT, 80, 0, "Close")
         self.GroupEnd()
 
         self.GroupEnd()
@@ -350,10 +351,19 @@ class OctaneLinkerDialog(gui.GeDialog):
         self.SetBool(G_REMOVE, True)
         self.SetBool(G_COLOR, True)
         self.SetInt32(G_MATCH, MATCH_AUTO)
+        self.Enable(G_NEXT, False)
         self.Enable(G_CANCEL, False)
         self.SetString(G_LOG, "Keep one Octane Universal material in the scene "
-                              "as a template, pick the texture folder, Run.")
+                              "as a template, pick the texture folder, then "
+                              "Start.\nConversion runs one group at a time: "
+                              "after each group, check Octane is OK, then click "
+                              "'Next group'.")
         return True
+
+    def _set_buttons(self, run, nxt, cancel):
+        self.Enable(G_RUN, run)
+        self.Enable(G_NEXT, nxt)
+        self.Enable(G_CANCEL, cancel)
 
     def _log(self, s=""):
         self._loglines.append(s)
@@ -373,13 +383,19 @@ class OctaneLinkerDialog(gui.GeDialog):
             if p:
                 self.SetString(G_TEX, p)
         elif cid == G_RUN:
-            self._start()
+            self._begin()
+        elif cid == G_NEXT:
+            self._advance()
         elif cid == G_CANCEL:
             if self._running:
-                self._cancel = True
+                self._cancel = True       # stop after the current step
+            elif self._session:
+                self._abort()
         elif cid == G_CLOSE:
             if self._running:
                 self._cancel = True
+            elif self._session:
+                self._abort()
             else:
                 self.Close()
         return True
@@ -388,10 +404,13 @@ class OctaneLinkerDialog(gui.GeDialog):
         if self._running:
             self._cancel = True
             return True
+        if self._session:
+            self._abort()
+            return True
         return False
 
-    def _start(self):
-        if self._running:
+    def _begin(self):
+        if self._running or self._session:
             return
         folder = self.GetString(G_TEX).strip()
         if not folder or not os.path.isdir(folder):
@@ -405,7 +424,7 @@ class OctaneLinkerDialog(gui.GeDialog):
         if template is None:
             self.SetString(G_LOG, "No Octane material found to use as a "
                                   "template.\nCreate one Octane Universal "
-                                  "material in the scene first, then Run.")
+                                  "material in the scene first, then Start.")
             return
 
         self._doc = doc
@@ -443,37 +462,110 @@ class OctaneLinkerDialog(gui.GeDialog):
             return
 
         self._cancel = False
-        self._idx = 0
         self._converted = 0
         self._wired = 0
         self._namemap = {}     # old name (lower) -> new octane material
         self._old = []         # originals to remove
-        self._since_event = 0
         self._cur = "Starting..."
 
         if self._dry:
+            self._mode = "dry"
+            self._idx = 0
             self._dry_list = self._mats
-            self._phase = "dry"
-        else:
-            # Process one scene group (top-level object) at a time, so Octane
-            # isn't asked to compile every material/load every texture at once.
-            self._groups = []
-            o = self._doc.GetFirstObject()
-            while o:
-                self._groups.append((o.GetName(), tags_under(o)))
-                o = o.GetNext()
-            self._total_tags = sum(len(t) for _, t in self._groups) or 1
-            self._done_tags = 0
-            self._gi = 0
-            self._ti = 0
-            self._phase = "process"
+            self._session = False
+            self._running = True
+            self._set_buttons(False, False, True)
+            self.SetTimer(20)
+            return
 
-        if not self._dry:
-            self._doc.StartUndo()
+        # Group-by-group: build the groups, then process the first one and
+        # WAIT for the user to confirm Octane is stable before continuing.
+        self._mode = "group"
+        self._groups = []
+        o = self._doc.GetFirstObject()
+        while o:
+            self._groups.append((o.GetName(), tags_under(o)))
+            o = o.GetNext()
+        self._total_tags = sum(len(t) for _, t in self._groups) or 1
+        self._done_tags = 0
+        self._gi = 0
+        self._session = True
+        self._doc.StartUndo()
+        self._log("%d group(s). One group is processed per click; check Octane "
+                  "between groups." % len(self._groups))
+        self._process_group()
+
+    def _process_group(self):
+        # Skip groups with no texture tags.
+        while self._gi < len(self._groups) and not self._groups[self._gi][1]:
+            self._gi += 1
+        if self._gi >= len(self._groups):
+            self._finalize()
+            return
+        self._ti = 0
+        gname = self._groups[self._gi][0]
+        self._cur = "Group %d/%d '%s'" % (self._gi + 1, len(self._groups),
+                                          gname)
         self._running = True
-        self.Enable(G_RUN, False)
-        self.Enable(G_CANCEL, True)
+        self._set_buttons(False, False, True)     # only Cancel while working
         self.SetTimer(20)
+
+    def _group_done(self):
+        self.SetTimer(0)
+        self._running = False
+        c4d.EventAdd()                            # load THIS group into Octane
+        gname = self._groups[self._gi][0]
+        self._gi += 1
+        self._log("Group %d/%d '%s' done.  Converted %d, wired %d so far."
+                  % (self._gi, len(self._groups), gname,
+                     self._converted, self._wired))
+        if self._gi >= len(self._groups):
+            self._log(">> All groups processed. Click 'Next group' to finish "
+                      "(remove originals + final refresh).")
+        else:
+            self._log(">> Check Octane is stable, then click 'Next group'.")
+        self._update_progress()
+        self._set_buttons(False, True, True)      # Next group + Cancel
+
+    def _advance(self):
+        if self._running or not self._session:
+            return
+        self._process_group()
+
+    def _finalize(self):
+        if self._remove:
+            for orig in self._old:
+                self._doc.AddUndo(c4d.UNDOTYPE_DELETE, orig)
+                orig.Remove()
+        try:
+            self._doc.EndUndo()
+        except Exception:
+            pass
+        c4d.EventAdd()
+        c4d.StatusClear()
+        self._session = False
+        self._log("-" * 58)
+        self._log("Done. Converted %d material(s); wired %d texture(s)."
+                  % (self._converted, self._wired))
+        self._prog.set(1.0, "Finished")
+        self._set_buttons(True, False, False)
+        print("\n".join(self._loglines))
+
+    def _abort(self):
+        self.SetTimer(0)
+        self._running = False
+        try:
+            self._doc.EndUndo()
+        except Exception:
+            pass
+        c4d.EventAdd()
+        c4d.StatusClear()
+        self._session = False
+        self._log("-" * 58)
+        self._log("Cancelled. Converted %d material(s) so far (one undo step)."
+                  % self._converted)
+        self._set_buttons(True, False, False)
+        print("\n".join(self._loglines))
 
     def _convert_material(self, orig):
         """Build the Octane Universal material for `orig` and return it."""
@@ -498,9 +590,9 @@ class OctaneLinkerDialog(gui.GeDialog):
         return new
 
     def _step(self):
-        ph = self._phase
-
-        if ph == "dry":
+        """Process one unit of work; return True when the current phase ends
+        (the whole dry list, or the current group's tags)."""
+        if self._mode == "dry":
             if self._idx < len(self._dry_list):
                 orig = self._dry_list[self._idx]
                 self._cur = "Preview %d/%d" % (self._idx + 1,
@@ -513,96 +605,45 @@ class OctaneLinkerDialog(gui.GeDialog):
                     self._log("   [dry] %-12s -> %s"
                               % (ch, os.path.basename(path)))
                 self._idx += 1
-            else:
-                self._phase = "finish"
-            return False
+                return False
+            return True
 
-        if ph == "process":
-            if self._gi < len(self._groups):
-                gname, tags = self._groups[self._gi]
-                if self._ti < len(tags):
-                    self._cur = "Group '%s'  %d/%d" % (
-                        gname, self._done_tags + 1, self._total_tags)
-                    tag = tags[self._ti]
-                    m = tag[c4d.TEXTURETAG_MATERIAL]
-                    if m is not None and m.GetType() == c4d.Mmaterial:
-                        new = self._namemap.get(m.GetName().lower())
-                        if new is None:
-                            new = self._convert_material(m)
-                            self._since_event += 1
-                        self._doc.AddUndo(c4d.UNDOTYPE_CHANGE, tag)
-                        tag[c4d.TEXTURETAG_MATERIAL] = new
-                    self._ti += 1
-                    self._done_tags += 1
-                    # Safety valve: refresh Octane every few new materials.
-                    if self._since_event >= EVENT_BATCH:
-                        self._since_event = 0
-                        c4d.EventAdd()
-                else:
-                    # Group done -> let Octane digest this group's textures.
-                    if self._since_event > 0:
-                        self._since_event = 0
-                        c4d.EventAdd()
-                    self._gi += 1
-                    self._ti = 0
-            else:
-                self._idx = 0
-                self._phase = "cleanup" if self._remove else "finish"
+        # group mode: one texture tag of the current group
+        gname, tags = self._groups[self._gi]
+        if self._ti < len(tags):
+            self._cur = "Group %d/%d '%s'  (%d/%d)" % (
+                self._gi + 1, len(self._groups), gname,
+                self._ti + 1, len(tags))
+            tag = tags[self._ti]
+            m = tag[c4d.TEXTURETAG_MATERIAL]
+            if m is not None and m.GetType() == c4d.Mmaterial:
+                new = self._namemap.get(m.GetName().lower())
+                if new is None:
+                    new = self._convert_material(m)
+                self._doc.AddUndo(c4d.UNDOTYPE_CHANGE, tag)
+                tag[c4d.TEXTURETAG_MATERIAL] = new
+            self._ti += 1
+            self._done_tags += 1
             return False
-
-        if ph == "cleanup":
-            if self._idx < len(self._old):
-                self._cur = "Removing old %d/%d" % (self._idx + 1,
-                                                    len(self._old))
-                orig = self._old[self._idx]
-                self._doc.AddUndo(c4d.UNDOTYPE_DELETE, orig)
-                orig.Remove()
-                self._idx += 1
-            else:
-                self._phase = "finish"
-            return False
-
         return True
 
     def _update_progress(self):
-        ph = self._phase
-        if ph == "dry":
+        if self._mode == "dry":
             frac = self._idx / float(len(self._dry_list) or 1)
-        elif ph == "process":
-            frac = self._done_tags / float(self._total_tags or 1)
-        elif ph == "cleanup":
-            frac = self._idx / float(len(self._old) or 1)
-        elif ph == "finish":
-            frac = 1.0
         else:
-            frac = 0.0
+            frac = self._done_tags / float(self._total_tags or 1)
         self._progress(frac, self._cur)
 
-    def _finish(self):
-        if not self._running:
-            return
-        self._running = False
+    def _finish_dry(self):
         self.SetTimer(0)
-        if not self._dry:
-            try:
-                self._doc.EndUndo()
-            except Exception:
-                pass
+        self._running = False
         c4d.StatusClear()
-        c4d.EventAdd()
         self._log("-" * 58)
-        if self._cancel:
-            self._log("Cancelled.")
-        elif self._dry:
-            self._log("Dry run done. %d material(s) would be converted."
-                      % len(self._mats))
-        else:
-            self._log("Done. Converted %d material(s); wired %d texture(s)."
-                      % (self._converted, self._wired))
-        self._prog.set(self._prog.percent if self._cancel else 1.0,
-                       "Cancelled" if self._cancel else "Finished")
-        self.Enable(G_RUN, True)
-        self.Enable(G_CANCEL, False)
+        self._log("Cancelled." if self._cancel
+                  else "Dry run done. %d material(s) previewed."
+                  % len(self._mats))
+        self._prog.set(1.0, "Finished")
+        self._set_buttons(True, False, False)
         print("\n".join(self._loglines))
 
     def Timer(self, msg):
@@ -610,7 +651,10 @@ class OctaneLinkerDialog(gui.GeDialog):
             return
         try:
             if self._cancel:
-                self._finish()
+                if self._mode == "dry":
+                    self._finish_dry()
+                else:
+                    self._abort()
                 return
             start = time.time()
             done = False
@@ -619,16 +663,21 @@ class OctaneLinkerDialog(gui.GeDialog):
                     done = True
                     break
             self._update_progress()
-            # NB: no EventAdd here -- Octane is refreshed per group/batch in
-            # _step so it isn't hit with every material at once (which crashes
-            # it). The progress bar updates without a scene event.
+            # No EventAdd mid-work: Octane is refreshed once per group (in
+            # _group_done) so it loads one group at a time.
             if done:
-                self._finish()
+                if self._mode == "dry":
+                    self._finish_dry()
+                else:
+                    self._group_done()
         except Exception:
             self._log("")
             self._log("ERROR -- stopped:")
             self._log(traceback.format_exc())
-            self._finish()
+            if self._mode == "group" and self._session:
+                self._abort()
+            else:
+                self._finish_dry()
 
 
 def main():
