@@ -92,9 +92,9 @@ CHANNEL_RULES = [
     ("normal",       ["normalmap", "normal", "nrml", "nrm", "norm"]),
     ("bump",         ["bump", "bmp", "heightmap", "height"]),
     ("displacement", ["displacement", "displace", "disp"]),
-    ("transmission", ["transmission", "transmit", "refraction",
-                      "transparency", "trans"]),
-    ("alpha",        ["opacitymask", "opacity", "alpha", "mask"]),
+    ("transmission", ["transmission", "transmit", "refraction"]),
+    ("alpha",        ["opacitymask", "opacity", "alpha", "transparency",
+                      "trans", "cutout", "mask"]),
     ("color",        ["basecolor", "albedo", "diffuse", "diff", "color",
                       "col", "base"]),
 ]
