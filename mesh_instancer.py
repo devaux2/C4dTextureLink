@@ -2,30 +2,36 @@
 mesh_instancer.py
 =================
 
-Cinema 4D S24+  --  turn repeated meshes into instances.
+Cinema 4D S24+  --  turn repeated meshes into instances, even when each copy
+has its transform baked into the vertex positions (as decompiled game maps
+usually do).
 
-A scene built by importing hundreds of OBJs often contains the same mesh
-(a tree, rock, prop) loaded many times over -- huge RAM and render cost. This
-tool finds objects whose geometry is identical, keeps one as the master, and
-replaces the rest with Instance objects that reference it, preserving each
-copy's position / rotation / scale.
+Why this is needed
+------------------
+Game engines store a model once and place it many times via per-instance
+transforms (GPU instancing). When a map is decompiled to OBJ, each placement
+is usually exported with its position/rotation/scale BAKED into the vertices,
+so two copies of the same tree have different vertex numbers and look like
+unrelated meshes. This tool matches meshes by SHAPE (topology + geometry up to
+a transform), keeps one master, recovers each copy's transform, and replaces
+the copies with instances at the right place.
 
 How it works
 ------------
-- Objects are bucketed by point + polygon count (cheap), then the geometry of
-  objects in contended buckets is hashed (local point positions + polygon
-  indices). Only exact matches are grouped, so different meshes are never
-  merged.
-- For each group of duplicates, the first is kept; the others become Instance
-  objects (Render Instances by default) at the same world transform.
+1. Bucket objects by point + polygon count (cheap).
+2. Within contended buckets, bucket again by polygon connectivity (same model
+   == same topology).
+3. Within a topology group, solve the affine transform that maps one mesh's
+   vertices onto another (vertex order is preserved, so it's exact) and verify
+   it. Matches are grouped.
+4. Keep one master; replace the rest with Instance objects whose matrix places
+   them exactly where the copy was.
 
 Use it
 ------
 Script Manager (Shift+F11) -> open this file -> Execute.
-- **Analyze**: scan and report duplicate groups + how many objects would be
-  removed. Changes nothing.
-- **Convert**: do the replacement (one undo step; Ctrl+Z reverts).
-Progress shows live; **Cancel** stops cleanly.
+- **Analyze**: report duplicate groups + how many objects would be removed.
+- **Convert**: replace duplicates with instances (one undo step).
 """
 
 import hashlib
@@ -37,9 +43,6 @@ from c4d import gui, documents
 
 
 TICK_BUDGET_MS = 50
-# Geometry quantisation for the hash (units of 1/QUANT). Identical instances
-# have bit-identical local points, so this only guards against float noise.
-QUANT = 10000.0
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +50,6 @@ QUANT = 10000.0
 # ---------------------------------------------------------------------------
 
 def all_objects(doc):
-    """Every object in the document, depth-first."""
     out = []
 
     def rec(o):
@@ -61,22 +63,13 @@ def all_objects(doc):
 
 
 def leaf_polygon_objects(doc):
-    """Polygon objects with no children (safe to replace with an instance)."""
-    res = []
-    for o in all_objects(doc):
-        if o.GetType() == c4d.Opolygon and o.GetDown() is None:
-            res.append(o)
-    return res
+    return [o for o in all_objects(doc)
+            if o.GetType() == c4d.Opolygon and o.GetDown() is None]
 
 
-def mesh_hash(obj):
-    """Hash of local point positions + polygon indices."""
+def poly_hash(obj):
+    """Hash of polygon connectivity (point indices)."""
     h = hashlib.md5()
-    buf = bytearray()
-    for v in obj.GetAllPoints():
-        buf += struct.pack("<qqq", int(round(v.x * QUANT)),
-                            int(round(v.y * QUANT)), int(round(v.z * QUANT)))
-    h.update(buf)
     buf = bytearray()
     for p in obj.GetAllPolygons():
         buf += struct.pack("<iiii", p.a, p.b, p.c, p.d)
@@ -84,12 +77,108 @@ def mesh_hash(obj):
     return h.hexdigest()
 
 
+def bbox_diag(pts):
+    if not pts:
+        return 1.0
+    mnx = mxx = pts[0].x
+    mny = mxy = pts[0].y
+    mnz = mxz = pts[0].z
+    for v in pts:
+        if v.x < mnx:
+            mnx = v.x
+        elif v.x > mxx:
+            mxx = v.x
+        if v.y < mny:
+            mny = v.y
+        elif v.y > mxy:
+            mxy = v.y
+        if v.z < mnz:
+            mnz = v.z
+        elif v.z > mxz:
+            mxz = v.z
+    d = ((mxx - mnx) ** 2 + (mxy - mny) ** 2 + (mxz - mnz) ** 2) ** 0.5
+    return d or 1.0
+
+
+def independent_triple(R, tol):
+    """Find 3 reference points spanning a non-degenerate basis. None if the
+    mesh is planar/linear."""
+    n = len(R)
+    p0 = R[0]
+    ia = a = None
+    for j in range(1, n):
+        d = R[j] - p0
+        if d.GetLength() > tol:
+            ia, a = j, d
+            break
+    if ia is None:
+        return None
+    al = a.GetLength()
+    ib = b = None
+    for j in range(1, n):
+        if j == ia:
+            continue
+        d = R[j] - p0
+        if a.Cross(d).GetLength() > tol * al:
+            ib, b = j, d
+            break
+    if ib is None:
+        return None
+    nrm = a.Cross(b)
+    nl = nrm.GetLength()
+    if nl <= 0:
+        return None
+    for j in range(1, n):
+        if j in (ia, ib):
+            continue
+        d = R[j] - p0
+        if abs(nrm.Dot(d)) / nl > tol:
+            return (ia, ib, j)
+    return None
+
+
+def verify(M, R, C, tol):
+    n = len(R)
+    step = max(1, n // 300)
+    for i in range(0, n, step):
+        if (M * R[i] - C[i]).GetLength() > tol:
+            return False
+    return True
+
+
+def solve_transform(R, rdiag, C):
+    """Return the c4d.Matrix mapping master-local points R onto copy-local
+    points C, or None if they aren't the same shape under a transform."""
+    n = len(R)
+    if n == 0 or n != len(C):
+        return None
+    tol_len = max(1e-4, rdiag * 1e-5)
+    pos_tol = max(1e-3, rdiag * 1e-4)
+    p0R, p0C = R[0], C[0]
+
+    trip = independent_triple(R, tol_len)
+    if trip is None:
+        # Planar/linear: only handle a pure translation.
+        M = c4d.Matrix()
+        M.off = p0C - p0R
+        return M if verify(M, R, C, pos_tol) else None
+
+    ia, ib, ic = trip
+    Rb = c4d.Matrix(c4d.Vector(0), R[ia] - p0R, R[ib] - p0R, R[ic] - p0R)
+    Cb = c4d.Matrix(c4d.Vector(0), C[ia] - p0C, C[ib] - p0C, C[ic] - p0C)
+    try:
+        A = Cb * (~Rb)               # linear part (off == 0)
+    except Exception:
+        return None
+    M = c4d.Matrix(p0C - (A * p0R), A.v1, A.v2, A.v3)
+    return M if verify(M, R, C, pos_tol) else None
+
+
 def set_render_instance(inst, on):
-    """Best-effort enable of Render Instance mode across C4D versions."""
     if not on:
         return
     try:
-        inst[c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE] = 1  # render instance
+        inst[c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE] = 1
         return
     except Exception:
         pass
@@ -99,22 +188,21 @@ def set_render_instance(inst, on):
         pass
 
 
-def make_instance(doc, master, original, render_inst):
-    """Replace `original` with an Instance of `master` at the same transform."""
-    mg = original.GetMg()
+def make_instance(doc, master, copy, m_at, render_inst):
+    """Replace `copy` with an instance of `master` at the copy's location."""
     inst = c4d.BaseObject(c4d.Oinstance)
-    inst.SetName(original.GetName())
+    inst.SetName(copy.GetName())
     inst[c4d.INSTANCEOBJECT_LINK] = master
     set_render_instance(inst, render_inst)
-    inst.InsertAfter(original)      # same parent, keep hierarchy position
-    inst.SetMg(mg)                  # preserve placement
+    inst.InsertAfter(copy)
+    inst.SetMg(copy.GetMg() * m_at)     # master-local -> copy world
     doc.AddUndo(c4d.UNDOTYPE_NEW, inst)
-    doc.AddUndo(c4d.UNDOTYPE_DELETE, original)
-    original.Remove()
+    doc.AddUndo(c4d.UNDOTYPE_DELETE, copy)
+    copy.Remove()
 
 
 # ---------------------------------------------------------------------------
-# Progress bar user area
+# Progress bar
 # ---------------------------------------------------------------------------
 
 class ProgressArea(gui.GeUserArea):
@@ -169,7 +257,6 @@ class InstancerDialog(gui.GeDialog):
         self._cancel = False
         self._cur = ""
 
-    # --- layout -----------------------------------------------------------
     def CreateLayout(self):
         self.SetTitle("Mesh -> Instances")
         self.GroupBegin(0, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 1, 0, "")
@@ -202,7 +289,6 @@ class InstancerDialog(gui.GeDialog):
                               "Convert.")
         return True
 
-    # --- helpers ----------------------------------------------------------
     def _log(self, s=""):
         self._loglines.append(s)
         if len(self._loglines) > 4000:
@@ -214,7 +300,6 @@ class InstancerDialog(gui.GeDialog):
         c4d.StatusSetText(label)
         c4d.StatusSetBar(int(frac * 100))
 
-    # --- events -----------------------------------------------------------
     def Command(self, cid, msg):
         if cid == G_ANALYZE:
             self._start("analyze")
@@ -251,31 +336,41 @@ class InstancerDialog(gui.GeDialog):
         self._cancel = False
         self._cur = "Scanning..."
 
-        # Cheap scan: gather leaf polygon objects and bucket by point/poly count.
         objs = leaf_polygon_objects(self._doc)
         self._log("=" * 58)
-        self._log("%s" % ("ANALYZE" if mode == "analyze" else "CONVERT"))
+        self._log("ANALYZE" if mode == "analyze" else "CONVERT")
         self._log("Polygon objects found: %d" % len(objs))
         if not objs:
             self._log("Nothing to do.")
             return
 
-        buckets = {}
+        # Bucket by (point count, poly count); only contended buckets matter.
+        size_buckets = {}
         for o in objs:
-            key = (o.GetPointCount(), o.GetPolygonCount())
-            buckets.setdefault(key, []).append(o)
-        # Only objects sharing a (points, polys) signature can be duplicates.
-        self._to_hash = [o for lst in buckets.values() if len(lst) >= 2
+            size_buckets.setdefault((o.GetPointCount(), o.GetPolygonCount()),
+                                    []).append(o)
+        self._to_hash = [o for lst in size_buckets.values() if len(lst) >= 2
                          for o in lst]
-        self._buckets = buckets
-        self._hashes = {}
-        self._groups = []
+        self._log("Candidates (shared point/poly count): %d"
+                  % len(self._to_hash))
+
+        # State
+        self._topo = {}            # (pcnt,vcnt,polyhash) -> [objs]
+        self._size_buckets = size_buckets
+        self._topo_groups = []
+        self._result = []          # [(master, [(copy, M)])]
         self._tasks = []
         self._idx = 0
         self._converted = 0
+        # cluster state
+        self._g = 0
+        self._m = 0
+        self._refs = []
+        self._clusters = []
+        self._cluster_total = 0
+        self._cluster_done = 0
 
-        self._log("Candidates to fingerprint: %d" % len(self._to_hash))
-        self._phase = "hash" if self._to_hash else "group"
+        self._phase = "topo" if self._to_hash else "group"
 
         if mode == "convert":
             self._doc.StartUndo()
@@ -286,35 +381,18 @@ class InstancerDialog(gui.GeDialog):
         self.Enable(G_CANCEL, True)
         self.SetTimer(20)
 
-    def _build_groups(self):
-        """Group contended objects by exact geometry hash."""
-        groups = []
-        for lst in self._buckets.values():
-            if len(lst) < 2:
-                continue
-            by_hash = {}
-            for o in lst:
-                hsh = self._hashes.get(id(o))
-                if hsh is None:
-                    continue
-                by_hash.setdefault(hsh, []).append(o)
-            for members in by_hash.values():
-                if len(members) >= 2:
-                    groups.append(members)
-        # Largest groups first (most impactful).
-        groups.sort(key=len, reverse=True)
-        return groups
-
     def _step(self):
         ph = self._phase
 
-        if ph == "hash":
+        # 2. topology bucketing
+        if ph == "topo":
             if self._idx < len(self._to_hash):
                 o = self._to_hash[self._idx]
-                self._cur = "Fingerprinting %d/%d" % (
-                    self._idx + 1, len(self._to_hash))
+                self._cur = "Topology %d/%d" % (self._idx + 1,
+                                                len(self._to_hash))
                 try:
-                    self._hashes[id(o)] = mesh_hash(o)
+                    key = (o.GetPointCount(), o.GetPolygonCount(), poly_hash(o))
+                    self._topo.setdefault(key, []).append(o)
                 except Exception:
                     pass
                 self._idx += 1
@@ -322,38 +400,80 @@ class InstancerDialog(gui.GeDialog):
                 self._phase = "group"
             return False
 
+        # build topo groups (cheap, do once)
         if ph == "group":
-            self._groups = self._build_groups()
-            dupes = sum(len(g) - 1 for g in self._groups)
-            self._log("Duplicate groups: %d   Objects that can become "
-                      "instances: %d" % (len(self._groups), dupes))
-            for g in self._groups[:25]:
-                self._log("   %-28s x%d"
-                          % (g[0].GetName(), len(g)))
-            if len(self._groups) > 25:
-                self._log("   ... and %d more group(s)"
-                          % (len(self._groups) - 25))
+            self._topo_groups = [lst for lst in self._topo.values()
+                                 if len(lst) >= 2]
+            self._cluster_total = sum(len(g) for g in self._topo_groups)
+            self._g = self._m = self._cluster_done = 0
+            self._refs, self._clusters = [], []
+            self._phase = "cluster" if self._topo_groups else "report"
+            return False
 
+        # 3. cluster by transform within each topology group
+        if ph == "cluster":
+            if self._g < len(self._topo_groups):
+                grp = self._topo_groups[self._g]
+                if self._m < len(grp):
+                    obj = grp[self._m]
+                    self._cur = "Matching %d/%d" % (self._cluster_done + 1,
+                                                    self._cluster_total)
+                    pts = obj.GetAllPoints()
+                    matched = False
+                    for ci, (robj, rpts, rdiag) in enumerate(self._refs):
+                        m_at = solve_transform(rpts, rdiag, pts)
+                        if m_at is not None:
+                            self._clusters[ci].append((obj, m_at))
+                            matched = True
+                            break
+                    if not matched:
+                        self._refs.append((obj, pts, bbox_diag(pts)))
+                        self._clusters.append([])
+                    self._m += 1
+                    self._cluster_done += 1
+                else:
+                    for ci, cl in enumerate(self._clusters):
+                        if cl:
+                            self._result.append((self._refs[ci][0], cl))
+                    self._refs, self._clusters = [], []
+                    self._m = 0
+                    self._g += 1
+            else:
+                self._phase = "report"
+            return False
+
+        # report groups
+        if ph == "report":
+            copies = sum(len(cl) for _, cl in self._result)
+            self._log("Instance groups: %d   Objects that become instances: %d"
+                      % (len(self._result), copies))
+            self._result.sort(key=lambda mc: len(mc[1]), reverse=True)
+            for master, cl in self._result[:25]:
+                self._log("   %-28s x%d" % (master.GetName(), len(cl) + 1))
+            if len(self._result) > 25:
+                self._log("   ... and %d more group(s)"
+                          % (len(self._result) - 25))
             if self._mode == "analyze":
                 self._phase = "finish"
             else:
-                # Flatten to (master, duplicate) tasks.
-                self._tasks = [(g[0], dup) for g in self._groups
-                               for dup in g[1:]]
+                self._tasks = [(master, copy, m) for master, cl in self._result
+                               for (copy, m) in cl]
                 self._idx = 0
                 self._phase = "convert"
             return False
 
+        # 4. convert
         if ph == "convert":
             if self._idx < len(self._tasks):
-                master, dup = self._tasks[self._idx]
-                self._cur = "Instancing %d/%d" % (
-                    self._idx + 1, len(self._tasks))
+                master, copy, m_at = self._tasks[self._idx]
+                self._cur = "Instancing %d/%d" % (self._idx + 1,
+                                                  len(self._tasks))
                 try:
-                    make_instance(self._doc, master, dup, self._render_inst)
+                    make_instance(self._doc, master, copy, m_at,
+                                  self._render_inst)
                     self._converted += 1
                 except Exception:
-                    self._log("   ! failed on %s" % dup.GetName())
+                    self._log("   ! failed on %s" % copy.GetName())
                 self._idx += 1
             else:
                 self._log("Converted %d object(s) to instances."
@@ -364,11 +484,14 @@ class InstancerDialog(gui.GeDialog):
         return True
 
     def _update_progress(self):
-        if self._phase == "hash":
+        ph = self._phase
+        if ph == "topo":
             frac = self._idx / float(len(self._to_hash) or 1)
-        elif self._phase == "convert":
+        elif ph == "cluster":
+            frac = self._cluster_done / float(self._cluster_total or 1)
+        elif ph == "convert":
             frac = self._idx / float(len(self._tasks) or 1)
-        elif self._phase == "finish":
+        elif ph == "finish":
             frac = 1.0
         else:
             frac = 0.0

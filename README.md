@@ -119,8 +119,17 @@ Workflow:
 
 ## Deduplicate into instances
 
-`mesh_instancer.py` finds objects with identical geometry, keeps one master,
-and replaces the rest with **Render Instances** at the same transform — a big
-RAM/render win when the same prop is imported many times. **Analyze** reports
-the duplicate groups and how many objects would be removed; **Convert** does it
-(one undo step). Positions/rotations/scale are preserved.
+`mesh_instancer.py` finds objects that are the **same shape** and replaces the
+duplicates with **Render Instances** — a big RAM/render win when the same prop
+is imported many times.
+
+Crucially it matches meshes **up to a transform**, not just byte-identical
+geometry. Decompiled game maps usually bake each placement's
+position/rotation/scale into the vertices, so copies of the same model have
+different vertex numbers. This tool buckets by topology (point/poly count +
+polygon connectivity), then solves and verifies the affine transform that maps
+one mesh onto another, and instances the copies with their recovered transforms
+— so positions/rotations/scale are preserved exactly.
+
+**Analyze** reports the duplicate groups and how many objects would be removed;
+**Convert** does it (one undo step).
