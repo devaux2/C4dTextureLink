@@ -9,6 +9,7 @@ bar, a results log, and a Cancel button; every run is a single undo step.
 | Stage | Script | Does |
 | --- | --- | --- |
 | 1 | `1_import_objects.py` | Import a folder of objects, organising each file's parts under a named Null. |
+| 1b | `group_objects.py` | Group objects **already in the scene** under Nulls by name (e.g. after merging one big FBX). |
 | 2 | `2_mesh_instancer.py` | Replace duplicated meshes with instances (shape-matched, transform-aware). |
 | 3 | `3_octane_inspector.py` | One-off: read your Octane build's parameter IDs (only if your version differs). |
 | 4 | `4_octane_texture_linker.py` | Build Octane Universal materials and wire the matching textures. |
@@ -38,6 +39,16 @@ Pick the objects folder and **Import**. Options:
 - **Spread apart** — *off by default*; on, it offsets files along X. Off keeps
   the source positions/scale exactly.
 - **Preview groups** shows the planned Nulls without importing.
+
+### Grouping objects already in the scene (`group_objects.py`)
+
+If you merged one big FBX/glTF, everything lands flat with names like
+`dire_tower002.dire_tower002.010`. This groups top-level objects under Nulls by
+name — by default the base is everything before the first dot
+(`dire_tower002.dire_tower002.010` → `dire_tower002`), so all copies of a model
+go under one Null. Options: strip a common prefix (auto-detect), merge `_N`
+split parts, and "only group 2+ objects" (leave unique objects loose). Positions
+and scale are preserved (it only re-parents). **Preview groups** shows the plan.
 
 ## Stage 2 — Instancing (`2_mesh_instancer.py`)
 
