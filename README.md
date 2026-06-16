@@ -123,6 +123,12 @@ Notes:
   **Diffuse map always loads** (it won't be skipped as "already connected"),
   and every present map — including **Roughness and Opacity** — is wired when a
   matching file exists.
+- Channel detection understands Source 2 / Dota naming:
+  `*_metalnessmask_*` → metalness, `*_specmask_*` / `*_vmat_g_tspecular*` →
+  specular, `*_selfillum_*` → emission, `*_refl_*` → reflection,
+  `*_trans_*` → transmission. Packed `*_orm_*` maps are skipped, and a file
+  with **no channel word** (e.g. `bones_tintable_002_psd_<hash>`) is treated as
+  the colour map.
 - Conversion is a **manual stepper**: click **Start** to do the first scene
   group (Null), check Octane is stable, then click **Next group** for the next,
   and so on. Octane only ever loads one group's textures at a time, which

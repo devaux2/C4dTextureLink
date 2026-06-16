@@ -75,26 +75,36 @@ IMAGE_EXTENSIONS = {
     ".exr", ".hdr", ".psd", ".iff", ".pict", ".dds", ".webp",
 }
 
-CHANNEL_KEYWORDS = {
-    "color":        ["basecolor", "albedo", "diffuse", "diff", "color", "col",
-                     "base", "d"],
-    "emission":     ["emissive", "emission", "emit", "glow", "luminance",
-                     "lum", "e"],
-    "specular":     ["specular", "spec", "s"],
-    "reflection":   ["reflection", "reflect", "refl"],
-    "roughness":    ["roughness", "rough", "rgh", "r"],
-    "glossiness":   ["glossiness", "glossy", "gloss", "gls"],
-    "metalness":    ["metalness", "metallic", "metal", "mtl", "m"],
-    "normal":       ["normal", "nrml", "nrm", "norm", "n"],
-    "bump":         ["bump", "bmp", "b"],
-    "displacement": ["displacement", "displace", "disp", "height", "heightmap",
-                     "h"],
-    "alpha":        ["opacity", "alpha", "mask", "o"],
-    "transmission": ["transmission", "transmit", "refraction", "transparency",
-                     "trans"],
-    "ao":           ["ambientocclusion", "occlusion", "ao"],
-}
-_SINGLE = {kw for kws in CHANNEL_KEYWORDS.values() for kw in kws if len(kw) == 1}
+# Channel detection, priority-ordered. Tokens >= 4 chars match as substrings
+# (so 'metalnessmask', 'tspecular', 'selfillum' are recognised); shorter tokens
+# (and single letters) must match exactly to avoid false hits on hashes.
+# Tuned for Source 2 / Dota exports like '<name>_metalnessmask_psd_<hash>'.
+CHANNEL_RULES = [
+    ("metalness",    ["metalnessmask", "metalness", "metallic", "metalmask",
+                      "metal", "mtl"]),
+    ("specular",     ["specularmask", "specmask", "tspecular", "specular",
+                      "spec"]),
+    ("roughness",    ["roughness", "rough", "rgh"]),
+    ("glossiness",   ["glossiness", "glossy", "gloss", "gls"]),
+    ("reflection",   ["reflection", "reflect", "refl"]),
+    ("emission",     ["selfillum", "emissive", "emission", "emit", "glow",
+                      "luminance", "illum", "lum"]),
+    ("normal",       ["normalmap", "normal", "nrml", "nrm", "norm"]),
+    ("bump",         ["bump", "bmp", "heightmap", "height"]),
+    ("displacement", ["displacement", "displace", "disp"]),
+    ("transmission", ["transmission", "transmit", "refraction",
+                      "transparency", "trans"]),
+    ("alpha",        ["opacitymask", "opacity", "alpha", "mask"]),
+    ("color",        ["basecolor", "albedo", "diffuse", "diff", "color",
+                      "col", "base"]),
+]
+# Tokens that mean "skip this file entirely" (packed/auxiliary maps).
+SKIP_TOKENS = {"orm", "ao", "ambientocclusion", "occlusion", "mra", "rma",
+               "spcmask"}
+# Single-letter suffixes (only used when allow_single is on).
+SINGLE = {"d": "color", "e": "emission", "s": "specular", "r": "roughness",
+          "m": "metalness", "n": "normal", "b": "bump", "h": "displacement",
+          "o": "alpha"}
 
 
 def _normalize(t):
@@ -123,16 +133,23 @@ def gather_files(folder, recursive):
 
 
 def detect_channel(file_path, allow_single):
+    """Return a channel key, "skip" (ignore this file), or None (no channel
+    word -- caller may treat it as the colour/diffuse map)."""
     base = os.path.splitext(os.path.basename(file_path))[0]
-    lookup = {}
-    for ch, kws in CHANNEL_KEYWORDS.items():
-        for kw in kws:
-            lookup.setdefault(kw, ch)
+    # Scan tokens from the end (the map type is usually the last real word
+    # before the _psd_/_tga_/<hash> tail).
     for tok in reversed(_tokenize(base)):
-        if tok in _SINGLE and not allow_single:
-            continue
-        if tok in lookup:
-            return lookup[tok]
+        if tok in SKIP_TOKENS:
+            return "skip"
+        for channel, kws in CHANNEL_RULES:
+            for kw in kws:
+                if len(kw) >= 4:
+                    if kw in tok:           # substring (metalnessmask, ...)
+                        return channel
+                elif tok == kw:             # short tokens: exact only
+                    return channel
+        if allow_single and len(tok) == 1 and tok in SINGLE:
+            return SINGLE[tok]
     return None
 
 
@@ -220,14 +237,24 @@ def wire_textures(new_mat, chosen, log):
 
 
 def collect_matches(mat_name, textures, match_all, allow_single):
+    """Pick one texture per channel for a material. Files with no channel word
+    (e.g. 'bones_tintable_002_psd_<hash>') are treated as the colour map if no
+    explicit colour texture is found."""
     chosen = {}
+    fallback_color = None
     for path, rel in textures:
         if not file_matches_material(rel, mat_name, match_all):
             continue
         ch = detect_channel(rel, allow_single)
-        if ch is None or ch == "ao":
+        if ch == "skip":
+            continue
+        if ch is None:
+            if fallback_color is None:
+                fallback_color = path
             continue
         chosen.setdefault(ch, path)
+    if "color" not in chosen and fallback_color is not None:
+        chosen["color"] = fallback_color
     return chosen
 
 
