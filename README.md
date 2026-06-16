@@ -119,6 +119,12 @@ Workflow:
 
 Notes:
 
+- **Matching uses the original texture reference.** OBJ/MTL import embeds the
+  source texture filename in each material; the linker reads that and matches
+  the folder by its asset stem (e.g. material `tree_oak_leaves_08` whose MTL
+  pointed at `leaves_white000_color` finds the `leaves_white000_*` maps). It
+  falls back to the material name if there's no embedded reference. The dry-run
+  log shows the resolved key as `[key:...]`.
 - The template clone's placeholder textures are stripped before wiring, so the
   **Diffuse map always loads** (it won't be skipped as "already connected"),
   and every present map — including **Roughness and Opacity** — is wired when a

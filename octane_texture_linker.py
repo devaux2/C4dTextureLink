@@ -153,14 +153,77 @@ def detect_channel(file_path, allow_single):
     return None
 
 
-def file_matches_material(rel_path, mat_name, match_all):
+FORMAT_TOKENS = {"psd", "tga", "png", "jpg", "jpeg", "tif", "tiff", "exr",
+                 "hdr", "bmp", "dds", "vmat", "g", "tex", "mat", "vtex"}
+
+
+def _is_hashish(tok):
+    """True for content-hash-looking tokens (long hex / long digit runs)."""
+    if len(tok) >= 6 and all(c in "0123456789abcdef" for c in tok):
+        return True
+    if len(tok) >= 8 and tok.isdigit():
+        return True
+    return False
+
+
+def _token_is_channel(tok):
+    if tok in SKIP_TOKENS:
+        return True
+    for _ch, kws in CHANNEL_RULES:
+        for kw in kws:
+            if len(kw) >= 4:
+                if kw in tok:
+                    return True
+            elif tok == kw:
+                return True
+    return False
+
+
+def asset_key_from_filename(fn):
+    """Reduce a texture filename to its asset stem (drop channel words, file
+    formats and content hashes). 'leaves_white000_color_psd_2e440edb' ->
+    'leaveswhite000'."""
+    base = os.path.splitext(os.path.basename(str(fn)))[0]
+    keep = []
+    for t in _tokenize(base):
+        if t in FORMAT_TOKENS or _is_hashish(t) or _token_is_channel(t):
+            continue
+        keep.append(t)
+    return _normalize("".join(keep))
+
+
+def material_asset_key(mat):
+    """The asset stem of the texture the imported (MTL) material already
+    references -- the most reliable key for finding its real maps. None if the
+    material has no embedded bitmap."""
+    if mat.GetType() != c4d.Mmaterial:
+        return None
+    for chan in (c4d.MATERIAL_COLOR_SHADER, c4d.MATERIAL_LUMINANCE_SHADER,
+                 c4d.MATERIAL_NORMAL_SHADER, c4d.MATERIAL_BUMP_SHADER,
+                 c4d.MATERIAL_ALPHA_SHADER):
+        try:
+            sh = mat[chan]
+        except Exception:
+            sh = None
+        if sh is not None and sh.GetType() == c4d.Xbitmap:
+            fn = sh[c4d.BITMAPSHADER_FILENAME]
+            if fn:
+                key = asset_key_from_filename(fn)
+                if len(key) >= 3:
+                    return key
+    return None
+
+
+def file_matches_material(rel_path, mat_name, asset_key, match_all):
+    """Match by the material's embedded texture stem (asset_key) when known,
+    falling back to the material name."""
     if match_all:
         return True
-    mn = _normalize(mat_name)
     pn = _normalize(rel_path)
-    if not mn:
-        return False
-    if mn in pn:
+    if asset_key and asset_key in pn:
+        return True
+    mn = _normalize(mat_name)
+    if mn and mn in pn:
         return True
     toks = [t for t in _tokenize(mat_name) if len(t) >= 3]
     return bool(toks) and all(_normalize(t) in pn for t in toks)
@@ -236,14 +299,14 @@ def wire_textures(new_mat, chosen, log):
     return n
 
 
-def collect_matches(mat_name, textures, match_all, allow_single):
+def collect_matches(mat_name, asset_key, textures, match_all, allow_single):
     """Pick one texture per channel for a material. Files with no channel word
     (e.g. 'bones_tintable_002_psd_<hash>') are treated as the colour map if no
     explicit colour texture is found."""
     chosen = {}
     fallback_color = None
     for path, rel in textures:
-        if not file_matches_material(rel, mat_name, match_all):
+        if not file_matches_material(rel, mat_name, asset_key, match_all):
             continue
         ch = detect_channel(rel, allow_single)
         if ch == "skip":
@@ -597,7 +660,9 @@ class OctaneLinkerDialog(gui.GeDialog):
     def _convert_material(self, orig):
         """Build the Octane Universal material for `orig` and return it."""
         name = orig.GetName()
-        chosen = collect_matches(name, self._textures, self._match_all, True)
+        key = material_asset_key(orig)
+        chosen = collect_matches(name, key, self._textures,
+                                 self._match_all, True)
         new = self._template.GetClone()
         new.SetName(name)
         clear_textures(new)        # so diffuse (and all maps) always load
@@ -607,7 +672,8 @@ class OctaneLinkerDialog(gui.GeDialog):
                 new[OCT_DIFFUSE_COLOR] = orig[c4d.MATERIAL_COLOR_COLOR]
             except Exception:
                 pass
-        self._log("Material: %s  (%d map(s))" % (name, len(chosen)))
+        self._log("Material: %s%s  (%d map(s))"
+                  % (name, "  [key:%s]" % key if key else "", len(chosen)))
         self._wired += wire_textures(new, chosen, self._log)
         self._doc.InsertMaterial(new)
         self._doc.AddUndo(c4d.UNDOTYPE_NEW, new)
@@ -624,10 +690,12 @@ class OctaneLinkerDialog(gui.GeDialog):
                 orig = self._dry_list[self._idx]
                 self._cur = "Preview %d/%d" % (self._idx + 1,
                                                len(self._dry_list))
-                chosen = collect_matches(orig.GetName(), self._textures,
+                key = material_asset_key(orig)
+                chosen = collect_matches(orig.GetName(), key, self._textures,
                                          self._match_all, True)
-                self._log("Material: %s  (%d map(s))"
-                          % (orig.GetName(), len(chosen)))
+                self._log("Material: %s%s  (%d map(s))"
+                          % (orig.GetName(),
+                             "  [key:%s]" % key if key else "", len(chosen)))
                 for ch, path in sorted(chosen.items()):
                     self._log("   [dry] %-12s -> %s"
                               % (ch, os.path.basename(path)))
