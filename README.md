@@ -10,6 +10,7 @@ bar, a results log, and a Cancel button; every run is a single undo step.
 | --- | --- | --- |
 | 1 | `1_import_objects.py` | Import a folder of objects, organising each file's parts under a named Null. |
 | 1b | `group_objects.py` | Group objects **already in the scene** under Nulls by name (e.g. after merging one big FBX). |
+| 1c | `sort_by_tris.py` | Reorder top-level objects/Nulls by triangle count (heaviest first), with a ranking. |
 | 2 | `2_mesh_instancer.py` | Replace duplicated meshes with instances (shape-matched, transform-aware). |
 | 3 | `3_octane_inspector.py` | One-off: read your Octane build's parameter IDs (only if your version differs). |
 | 4 | `4_octane_texture_linker.py` | Build Octane Universal materials and wire the matching textures. |
