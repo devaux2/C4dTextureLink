@@ -1,9 +1,17 @@
 # C4D Texture Linker
 
-A Cinema 4D **S24** Python script that auto-connects texture maps to the
-correct material channels — built for the "import an OBJ + MTL group, then
-wire up all the PBR maps from another folder" workflow, without doing it by
-hand for every material.
+Cinema 4D **S24** Python scripts that auto-connect texture maps to the correct
+material channels — built for the "import an OBJ + MTL group, then wire up all
+the PBR maps from another folder" workflow, without doing it by hand for every
+material.
+
+Two entry points:
+
+- **`texture_linker.py`** — link textures to the materials already in your
+  scene.
+- **`import_and_link.py`** — one shot: import a whole folder of objects, *then*
+  link textures from a second folder. (Imports its matching logic from
+  `texture_linker.py`, so keep both files in the same folder.)
 
 ## What it does
 
@@ -24,6 +32,24 @@ hand for every material.
 
 A folder picker appears; choose your texture folder. A summary dialog reports
 what was assigned, and the full log is printed to the Python console.
+
+## Import + link in one go
+
+Run `import_and_link.py` from the Script Manager. It asks for:
+
+1. an **objects folder** — every `.obj`/`.fbx`/`.3ds`/`.dae`/`.abc`/`.gltf`/…
+   file in it is merged into the current scene;
+2. a **texture folder** — textures are then matched to the resulting
+   materials exactly as `texture_linker.py` does.
+
+Both steps happen inside a single undo block, so one `Ctrl+Z` reverts the
+whole operation. Key settings at the top of the file:
+
+| Setting | Purpose |
+| --- | --- |
+| `OBJECTS_FOLDER` / `TEXTURE_FOLDER` | Hard-code folders to skip the pickers. |
+| `RECURSIVE_OBJECTS` | Search sub-folders for objects to import. |
+| `SPREAD_OBJECTS` / `SPREAD_SPACING` | Offset each imported file along X so they don't overlap. |
 
 ## Configuration
 

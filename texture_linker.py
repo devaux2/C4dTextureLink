@@ -313,42 +313,36 @@ def process_material(mat, textures, channel_table, log):
     return assigned
 
 
-def main():
-    doc = c4d.documents.GetActiveDocument()
-    if doc is None:
-        gui.MessageDialog("No active document.")
-        return
+def link_all(doc, folder, manage_undo=True):
+    """Link every classic material in `doc` to textures in `folder`.
 
-    # 1. Resolve the texture folder.
-    folder = TEXTURE_FOLDER
-    if not folder:
-        folder = storage.LoadDialog(
-            title="Select the texture folder",
-            flags=c4d.FILESELECT_DIRECTORY)
-    if not folder or not os.path.isdir(folder):
-        gui.MessageDialog("No valid texture folder selected.")
-        return
+    Reusable entry point (the combined importer script calls this too).
+    Returns (textures_assigned, log_lines). `log` carries its own status
+    lines; callers can print/show it. Set `manage_undo=False` when the caller
+    already wrapped the work in StartUndo()/EndUndo().
+    """
+    log = []
 
-    # 2. Index the textures.
     textures = gather_textures(folder, RECURSIVE)
     if not textures:
-        gui.MessageDialog("No image files found in:\n%s" % folder)
-        return
+        log.append("No image files found in: %s" % folder)
+        return 0, log
 
     materials = doc.GetMaterials()
     if not materials:
-        gui.MessageDialog("The scene has no materials.")
-        return
+        log.append("The scene has no materials.")
+        return 0, log
 
     channel_table = _build_channel_table()
-    log = ["Texture folder: %s" % folder,
-           "Images found:   %d" % len(textures),
-           "Materials:      %d" % len(materials),
-           "Match mode:     %s" % MATCH_MODE,
-           "Dry run:        %s" % DRY_RUN,
-           "-" * 60]
+    log += ["Texture folder: %s" % folder,
+            "Images found:   %d" % len(textures),
+            "Materials:      %d" % len(materials),
+            "Match mode:     %s" % MATCH_MODE,
+            "Dry run:        %s" % DRY_RUN,
+            "-" * 60]
 
-    doc.StartUndo()
+    if manage_undo:
+        doc.StartUndo()
     total = 0
     try:
         for mat in materials:
@@ -361,11 +355,31 @@ def main():
             total += process_material(mat, textures, channel_table, log)
             log.append("")
     finally:
-        doc.EndUndo()
+        if manage_undo:
+            doc.EndUndo()
 
     log.append("-" * 60)
     log.append("Done. %d texture(s) %s."
                % (total, "would be assigned" if DRY_RUN else "assigned"))
+    return total, log
+
+
+def main():
+    doc = c4d.documents.GetActiveDocument()
+    if doc is None:
+        gui.MessageDialog("No active document.")
+        return
+
+    folder = TEXTURE_FOLDER
+    if not folder:
+        folder = storage.LoadDialog(
+            title="Select the texture folder",
+            flags=c4d.FILESELECT_DIRECTORY)
+    if not folder or not os.path.isdir(folder):
+        gui.MessageDialog("No valid texture folder selected.")
+        return
+
+    _total, log = link_all(doc, folder)
 
     c4d.EventAdd()
 
