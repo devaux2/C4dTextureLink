@@ -50,10 +50,18 @@ name — by default the base is everything before the first dot
 go under one Null. For Source 2 / Dota mesh names like
 `n0_lr0_c0_s_cb_nomerge84_water_flow.meshset_0`, tick **Strip Source 2 mesh
 boilerplate** to peel off the `n0_/lr0_/c0_/s_/cb_/nomergeNNN_/…/.meshset_0`
-wrapper down to the real asset (`water_flow`). Options: strip a common prefix
+wrapper down to the real asset (`water_flow`). If the asset itself ends in an
+*instance index* (e.g. `mesh_overlay117`, `mesh_overlay332` — same asset,
+different copy), tick **Strip trailing numbers** to merge them all into one
+`mesh_overlay` group (aggressive — it also merges `tree007`/`tree008`, so use
+it only when the trailing number is an instance index). Better for most cases
+is **Nested**: builds `category > model > instances`
+(`tree > tree008 > tree008_1/2/3`, `mesh_overlay > mesh_overlay117`), giving a
+tidy ~N top-level categories while keeping every specific name underneath —
+without merging different models. Other options: strip a common prefix
 (auto-detect), merge `_N` split parts, and "only group 2+ objects" (leave
 unique objects loose). Positions and scale are preserved (it only re-parents).
-**Preview groups** shows the plan.
+**Preview groups** shows the resulting top-level count.
 
 ## Stage 2 — Instancing (`2_mesh_instancer.py`)
 

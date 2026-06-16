@@ -110,12 +110,22 @@ def top_level_objects(doc):
     return out
 
 
-def plan_groups(objs, use_full, strip_prefix, do_collapse, s2=False):
+def strip_trailing_num(name):
+    """Drop a trailing instance index, attached or not: mesh_overlay117 ->
+    mesh_overlay, lily_pad001 -> lily_pad."""
+    s = re.sub(r"[ _\-.]*\d+$", "", name)
+    return s if s else name
+
+
+def plan_groups(objs, use_full, strip_prefix, do_collapse, s2=False,
+                strip_num=False):
     """Return (names_per_obj, groups) where names_per_obj is the group name for
     each object, and groups = ordered [(name, count), ...]."""
     bases = [strip_name_prefix(base_key(o.GetName(), use_full, s2), strip_prefix)
              for o in objs]
     names = collapse_part_suffixes(bases) if do_collapse else bases
+    if strip_num:
+        names = [strip_trailing_num(n) for n in names]
     order, counts = [], {}
     for n in names:
         k = n.lower()
@@ -125,6 +135,34 @@ def plan_groups(objs, use_full, strip_prefix, do_collapse, s2=False):
         counts[k][1] += 1
     groups = [(counts[k][0], counts[k][1]) for k in order]
     return names, groups
+
+
+def levels_for(name, nested, strip_num):
+    """The Null nesting path for a base name.
+      nested   -> [category, model]  (mesh_overlay > mesh_overlay117),
+                  or [name] when there's no trailing number to peel.
+      strip_num-> [category]         (flat, merge instances).
+      else     -> [name]."""
+    if nested:
+        cat = strip_trailing_num(name)
+        return [cat] if cat == name else [cat, name]
+    if strip_num:
+        return [strip_trailing_num(name)]
+    return [name]
+
+
+def top_groups(names, nested, strip_num):
+    """Ordered [(top_level_name, object_count), ...] -- the resulting top-level
+    Nulls."""
+    order, counts = [], {}
+    for n in names:
+        top = levels_for(n, nested, strip_num)[0]
+        k = top.lower()
+        if k not in counts:
+            counts[k] = [top, 0]
+            order.append(k)
+        counts[k][1] += 1
+    return [(counts[k][0], counts[k][1]) for k in order]
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +214,8 @@ G_CLOSE = 6008
 G_LOG = 6009
 G_PROG = 6010
 G_S2 = 6011
+G_STRIPNUM = 6012
+G_NEST = 6013
 
 _dialog = None
 
@@ -202,6 +242,12 @@ class GroupDialog(gui.GeDialog):
         self.AddCheckbox(G_S2, c4d.BFH_LEFT, 0, 0,
                          "Strip Source 2 mesh boilerplate "
                          "(n0/lr/c/s/cb/nomerge/nosplit/meshset)")
+        self.AddCheckbox(G_STRIPNUM, c4d.BFH_LEFT, 0, 0,
+                         "Strip trailing numbers (merge instances like "
+                         "overlay117 -> overlay)")
+        self.AddCheckbox(G_NEST, c4d.BFH_LEFT, 0, 0,
+                         "Nested: category > model > instances "
+                         "(tree > tree008 > ...)")
 
         self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
         self.AddCheckbox(G_FULL, c4d.BFH_LEFT, 0, 0,
@@ -232,6 +278,8 @@ class GroupDialog(gui.GeDialog):
     def InitValues(self):
         self.SetString(G_PREFIX, "")
         self.SetBool(G_S2, False)
+        self.SetBool(G_STRIPNUM, False)
+        self.SetBool(G_NEST, False)
         self.SetBool(G_FULL, False)
         self.SetBool(G_COLLAPSE, True)
         self.SetBool(G_MIN2, True)
@@ -250,7 +298,8 @@ class GroupDialog(gui.GeDialog):
     def _opts(self):
         return (self.GetBool(G_FULL), self.GetString(G_PREFIX).strip(),
                 self.GetBool(G_COLLAPSE), self.GetBool(G_MIN2),
-                self.GetBool(G_S2))
+                self.GetBool(G_S2), self.GetBool(G_STRIPNUM),
+                self.GetBool(G_NEST))
 
     def _resolve_prefix(self, objs, use_full, s2):
         prefix = self.GetString(G_PREFIX).strip()
@@ -304,11 +353,14 @@ class GroupDialog(gui.GeDialog):
         if not objs:
             self.SetString(G_LOG, "No top-level objects in the scene.")
             return
-        use_full, _pf, collapse, min2, s2 = self._opts()
+        use_full, _pf, collapse, min2, s2, stripnum, nested = self._opts()
         prefix = self._resolve_prefix(objs, use_full, s2)
-        _names, groups = plan_groups(objs, use_full, prefix, collapse, s2)
+        names, _g = plan_groups(objs, use_full, prefix, collapse, s2, False)
+        groups = top_groups(names, nested, stripnum)
         kept = sum(1 for _n, c in groups if (c >= 2 or not min2))
         self._loglines = ["Group preview (nothing changed yet):", ""]
+        if nested:
+            self._loglines.append("Nested: category > model > instances")
         self._loglines += self._summary(groups, len(objs), kept, prefix)
         self.SetString(G_LOG, "\n".join(self._loglines))
 
@@ -324,19 +376,20 @@ class GroupDialog(gui.GeDialog):
             self.SetString(G_LOG, "No top-level objects in the scene.")
             return
 
-        use_full, _pf, collapse, min2, s2 = self._opts()
+        use_full, _pf, collapse, min2, s2, stripnum, nested = self._opts()
         prefix = self._resolve_prefix(objs, use_full, s2)
-        names, groups = plan_groups(objs, use_full, prefix, collapse, s2)
+        names, _g = plan_groups(objs, use_full, prefix, collapse, s2, False)
 
-        # Which group names are large enough to make a Null for.
-        count_by = {}
-        for n in names:
-            count_by[n.lower()] = count_by.get(n.lower(), 0) + 1
-        # Build the work list: objects whose group will be created.
+        # Nesting path per object; group by the TOP level for the min2 test.
+        paths = [levels_for(n, nested, stripnum) for n in names]
+        count_by_top = {}
+        for p in paths:
+            count_by_top[p[0].lower()] = count_by_top.get(p[0].lower(), 0) + 1
+        # work list: (obj, [level names]) for objects whose top group is kept.
         self._tasks = []
-        for obj, name in zip(objs, names):
-            if (not min2) or count_by[name.lower()] >= 2:
-                self._tasks.append((obj, name))
+        for obj, p in zip(objs, paths):
+            if (not min2) or count_by_top[p[0].lower()] >= 2:
+                self._tasks.append((obj, p))
 
         if not self._tasks:
             self.SetString(G_LOG, "Nothing to group (no name shared by 2+ "
@@ -362,20 +415,30 @@ class GroupDialog(gui.GeDialog):
     def _step(self):
         if self._idx >= len(self._tasks):
             return True
-        obj, name = self._tasks[self._idx]
+        obj, levels = self._tasks[self._idx]
         self._cur = "Grouping %d/%d" % (self._idx + 1, len(self._tasks))
-        key = name.lower()
-        null = self._nulls.get(key)
-        if null is None:
-            null = c4d.BaseObject(c4d.Onull)
-            null.SetName(name)
-            self._doc.InsertObject(null)
-            self._doc.AddUndo(c4d.UNDOTYPE_NEW, null)
-            self._nulls[key] = null
-        if obj != null:
+
+        # Walk/create the Null path, then parent the object under the deepest.
+        parent = None        # None => document root
+        path = ""
+        for lvl in levels:
+            path += "/" + lvl.lower()
+            null = self._nulls.get(path)
+            if null is None:
+                null = c4d.BaseObject(c4d.Onull)
+                null.SetName(lvl)
+                if parent is None:
+                    self._doc.InsertObject(null)
+                else:
+                    null.InsertUnder(parent)
+                self._doc.AddUndo(c4d.UNDOTYPE_NEW, null)
+                self._nulls[path] = null
+            parent = null
+
+        if obj != parent:
             mg = obj.GetMg()
             self._doc.AddUndo(c4d.UNDOTYPE_CHANGE, obj)
-            obj.InsertUnder(null)
+            obj.InsertUnder(parent)
             obj.SetMg(mg)              # preserve world transform
         self._idx += 1
         return False
