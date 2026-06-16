@@ -148,13 +148,18 @@ def _tokenize(name):
 
 
 def gather_textures(folder, recursive):
-    """Return a list of (full_path, file_name) for every image in folder."""
+    """Return (full_path, rel_path) for every image at/under `folder`.
+
+    `rel_path` is relative to `folder`, so any sub-folder names (e.g. a
+    per-material folder) are available for name matching.
+    """
     found = []
     if recursive:
         for root, _dirs, files in os.walk(folder):
             for f in files:
                 if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS:
-                    found.append((os.path.join(root, f), f))
+                    full = os.path.join(root, f)
+                    found.append((full, os.path.relpath(full, folder)))
     else:
         for f in os.listdir(folder):
             full = os.path.join(folder, f)
@@ -164,13 +169,13 @@ def gather_textures(folder, recursive):
     return found
 
 
-def detect_channel(file_name):
+def detect_channel(file_path):
     """Work out which channel a texture belongs to from its name.
 
-    Scans tokens from the end of the name (the suffix usually carries the
+    Scans tokens from the end of the file name (the suffix usually carries the
     map type) and returns the first channel key that matches, or None.
     """
-    base = os.path.splitext(file_name)[0]
+    base = os.path.splitext(os.path.basename(file_path))[0]
     tokens = _tokenize(base)
 
     # Build token -> channel lookup (first keyword wins on ties).
@@ -189,11 +194,34 @@ def detect_channel(file_name):
     return None
 
 
-def file_matches_material(file_name, material_name):
-    """True if this file should be considered for this material."""
-    if MATCH_MODE == "all":
+def file_matches_material(rel_path, material_name, match_all):
+    """True if this texture should be considered for this material.
+
+    Matching is done on the *path relative to the texture folder* (so a
+    per-material sub-folder counts), with separators/punctuation stripped:
+
+      - `match_all`            -> always true (one folder == one material, or
+                                  forced via MATCH_MODE = "all").
+      - material name in path  -> e.g. mat "WoodFloor" vs "WoodFloor_Color.png"
+                                  or ".../WoodFloor/color.png".
+      - all material tokens    -> every alphabetic token of the material name
+        present in path           (>=3 chars) appears somewhere in the path,
+                                  catching reordered / partial names.
+    """
+    if match_all:
         return True
-    return _normalize(material_name) in _normalize(file_name)
+
+    mat_n = _normalize(material_name)
+    path_n = _normalize(rel_path)
+    if not mat_n:
+        return False
+    if mat_n in path_n:
+        return True
+
+    tokens = [t for t in _tokenize(material_name) if len(t) >= 3]
+    if tokens and all(_normalize(t) in path_n for t in tokens):
+        return True
+    return False
 
 
 def make_bitmap_shader(mat, path, is_color):
@@ -250,7 +278,7 @@ def _assign_reflectance(mat, channel, path, log):
 # Core
 # ---------------------------------------------------------------------------
 
-def process_material(mat, textures, channel_table, log):
+def process_material(mat, textures, channel_table, match_all, log):
     """Assign matching textures to one material. Returns count assigned."""
     mat_name = mat.GetName()
     log.append("Material: %s" % mat_name)
@@ -258,10 +286,10 @@ def process_material(mat, textures, channel_table, log):
     # Collect candidate files and the channel each one maps to.
     # Keep only the first file found per channel (avoid double assignment).
     chosen = {}
-    for path, fname in textures:
-        if not file_matches_material(fname, mat_name):
+    for path, rel in textures:
+        if not file_matches_material(rel, mat_name, match_all):
             continue
-        channel = detect_channel(fname)
+        channel = detect_channel(rel)
         if channel is None:
             continue
         if channel == "ao":
@@ -333,11 +361,20 @@ def link_all(doc, folder, manage_undo=True):
         log.append("The scene has no materials.")
         return 0, log
 
+    classic = [m for m in materials if m.GetType() == c4d.Mmaterial]
+
+    # If MATCH_MODE is "all", or there is exactly one classic material, every
+    # file in the folder is a candidate (no point name-matching a lone
+    # material). Otherwise files must match a material by name.
+    match_all = (MATCH_MODE == "all") or (len(classic) == 1)
+
     channel_table = _build_channel_table()
     log += ["Texture folder: %s" % folder,
             "Images found:   %d" % len(textures),
-            "Materials:      %d" % len(materials),
-            "Match mode:     %s" % MATCH_MODE,
+            "Materials:      %d (%d classic)" % (len(materials), len(classic)),
+            "Match mode:     %s" % ("all (auto: single material)"
+                                    if match_all and MATCH_MODE != "all"
+                                    else MATCH_MODE),
             "Dry run:        %s" % DRY_RUN,
             "-" * 60]
 
@@ -349,10 +386,12 @@ def link_all(doc, folder, manage_undo=True):
             if mat.GetType() != c4d.Mmaterial:
                 log.append("Material: %s  (not a classic material -- skipped)"
                            % mat.GetName())
+                log.append("")
                 continue
             if not DRY_RUN:
                 doc.AddUndo(c4d.UNDOTYPE_CHANGE, mat)
-            total += process_material(mat, textures, channel_table, log)
+            total += process_material(mat, textures, channel_table,
+                                      match_all, log)
             log.append("")
     finally:
         if manage_undo:
@@ -361,6 +400,20 @@ def link_all(doc, folder, manage_undo=True):
     log.append("-" * 60)
     log.append("Done. %d texture(s) %s."
                % (total, "would be assigned" if DRY_RUN else "assigned"))
+
+    # Nothing matched and we were name-matching: most likely the material
+    # names don't appear in the file names. Give an actionable hint.
+    if total == 0 and not match_all and classic:
+        log.append("")
+        log.append("Nothing matched. Material names probably don't appear in "
+                   "the texture file names.")
+        log.append("Material names: %s"
+                   % ", ".join(m.GetName() for m in classic[:12]))
+        log.append("Example files:  %s"
+                   % ", ".join(os.path.basename(p) for p, _ in textures[:6]))
+        log.append("Fix: rename so files contain the material name, put each "
+                   "material's maps in a sub-folder named after it, or set "
+                   "MATCH_MODE = \"all\".")
     return total, log
 
 

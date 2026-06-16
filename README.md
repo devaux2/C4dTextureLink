@@ -62,6 +62,23 @@ Edit the `CONFIG` block at the top of `texture_linker.py`:
 | `DRY_RUN` | Log what *would* happen without changing anything. |
 | `OVERWRITE_EXISTING` | Replace a channel that already has a shader. |
 | `MATCH_MODE` | `"name_in_filename"` (many materials share a folder) or `"all"` (one material per folder). |
+
+### How files are matched to materials
+
+In `"name_in_filename"` mode a texture is linked to a material when, after
+stripping punctuation/case, **the material's name appears in the texture's path
+relative to the chosen folder**. So all of these match material `WoodFloor`:
+
+- `WoodFloor_BaseColor.png`
+- `WoodFloor/basecolor.png` (a sub-folder named after the material)
+- `wood_floor_color.png` (material named `Wood Floor`)
+
+Two conveniences:
+
+- If the scene has **exactly one classic material**, name-matching is skipped
+  and every file in the folder is used (a lone material owns all the maps).
+- If nothing matches, the log prints your material names and a few example
+  filenames, plus how to fix it (rename, use sub-folders, or `MATCH_MODE = "all"`).
 | `ALLOW_SINGLE_LETTER_SUFFIX` | Honour suffixes like `wood_D`, `wood_N`, `wood_R`. |
 
 The `CHANNEL_KEYWORDS` table maps file-name tokens to channels — extend it to

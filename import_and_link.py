@@ -102,7 +102,9 @@ def _top_level_objects(doc):
 
 def import_objects(doc, paths, log):
     """Merge each file into `doc`. Returns number of files imported."""
-    flags = c4d.SCENEFILTER_OBJECTS | c4d.SCENEFILTER_MATERIALS
+    flags = (c4d.SCENEFILTER_OBJECTS
+             | c4d.SCENEFILTER_MATERIALS
+             | c4d.SCENEFILTER_MERGESCENE)
     imported = 0
     offset_index = 0
 
