@@ -353,12 +353,17 @@ def merge_one(doc, full, opts, offset_index, log):
         obj = obj.GetNext()
 
     if opts.spread and new_roots:
-        for root in new_roots:
-            doc.AddUndo(c4d.UNDOTYPE_CHANGE, root)
-            pos = root.GetRelPos()
-            pos.x += offset_index * SPREAD_SPACING
-            root.SetRelPos(pos)
         offset_index += 1
+
+    for root in new_roots:
+        if opts.spread:
+            pos = root.GetRelPos()
+            pos.x += (offset_index - 1) * SPREAD_SPACING
+            root.SetRelPos(pos)
+        # UNDOTYPE_NEW is cheap (no geometry copy) and makes the merge
+        # undoable; UNDOTYPE_CHANGE would snapshot the whole mesh and can
+        # balloon RAM into the tens of GB on heavy scenes.
+        doc.AddUndo(c4d.UNDOTYPE_NEW, root)
 
     log("   [ok] %s  (%d object(s))"
         % (os.path.basename(full), len(new_roots)))
@@ -669,6 +674,7 @@ class TextureToolDialog(gui.GeDialog):
         self._offset_index = 0
         self._imported_count = 0
         self._assigned_total = 0
+        self._last_event = 0
         self._cur_label = "Starting..."
 
         self._doc.StartUndo()
@@ -815,7 +821,13 @@ class TextureToolDialog(gui.GeDialog):
                     done = True
                     break
             self._update_progress()
-            c4d.EventAdd()  # show imported objects / material changes live
+            # Throttle full scene refreshes -- EventAdd rebuilds caches for the
+            # whole scene, which thrashes RAM/CPU on big imports. The progress
+            # bar updates without it; we refresh the viewport occasionally and
+            # once at the end.
+            if self._imported_count - self._last_event >= 25:
+                self._last_event = self._imported_count
+                c4d.EventAdd()
             if done:
                 self._finish()
         except Exception:
