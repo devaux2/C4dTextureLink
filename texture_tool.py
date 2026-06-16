@@ -409,8 +409,13 @@ def decide_match_all(opts, classic_count):
     return classic_count == 1  # auto
 
 
-def merge_collect(doc, full, log):
-    """Merge one file into doc. Returns (ok, [new top-level objects])."""
+def merge_collect(doc, full, log, ignore_null_names=()):
+    """Merge one file into doc. Returns (ok, [new top-level objects]).
+
+    `ignore_null_names` (lower-case) are group Nulls we created; never report
+    them as 'new' even if MergeDocument hands back a fresh wrapper for them
+    (which would otherwise look like a newly imported object).
+    """
     flags = (c4d.SCENEFILTER_OBJECTS | c4d.SCENEFILTER_MATERIALS
              | c4d.SCENEFILTER_MERGESCENE)
 
@@ -432,7 +437,10 @@ def merge_collect(doc, full, log):
     obj = doc.GetFirstObject()
     while obj:
         if id(obj) not in before_ids:
-            roots.append(obj)
+            is_our_null = (obj.GetType() == c4d.Onull
+                           and obj.GetName().lower() in ignore_null_names)
+            if not is_our_null:
+                roots.append(obj)
         obj = obj.GetNext()
 
     log("   [ok] %s  (%d object(s))"
@@ -459,6 +467,8 @@ def place_roots(doc, roots, group_null, opts, offset_index):
     moved = False
     for root in roots:
         if group_null is not None:
+            if root == group_null:       # never parent the Null under itself
+                continue
             mg = root.GetMg()            # remember world transform
             root.InsertUnder(group_null)
             root.SetMg(mg)               # restore it after re-parenting
@@ -487,13 +497,14 @@ def import_objects(doc, opts, log, progress=None):
     for i, (gname, full) in enumerate(plan):
         if progress:
             progress(i, len(plan), "Importing " + os.path.basename(full))
-        null = None
-        if gname is not None:
-            null = nulls.get(gname) or make_group_null(doc, gname)
-            nulls[gname] = null
-        ok, roots = merge_collect(doc, full, log)
+        ok, roots = merge_collect(doc, full, log, set(nulls.keys()))
         if ok:
             imported += 1
+        null = None
+        if gname is not None:
+            key = gname.lower()
+            null = nulls.get(key) or make_group_null(doc, gname)
+            nulls[key] = null
         offset_index = place_roots(doc, roots, null, opts, offset_index)
     return imported
 
@@ -893,15 +904,17 @@ class TextureToolDialog(gui.GeDialog):
                 self._cur_label = "Importing %d/%d  %s" % (
                     self._idx + 1, len(self._import_plan),
                     os.path.basename(full))
-                null = None
-                if gname is not None:
-                    null = self._group_nulls.get(gname)
-                    if null is None:
-                        null = make_group_null(self._doc, gname)
-                        self._group_nulls[gname] = null
-                ok, roots = merge_collect(self._doc, full, self._log)
+                ok, roots = merge_collect(self._doc, full, self._log,
+                                          set(self._group_nulls.keys()))
                 if ok:
                     self._imported_count += 1
+                null = None
+                if gname is not None:
+                    key = gname.lower()
+                    null = self._group_nulls.get(key)
+                    if null is None:
+                        null = make_group_null(self._doc, gname)
+                        self._group_nulls[key] = null
                 self._offset_index = place_roots(
                     self._doc, roots, null, self._opts, self._offset_index)
                 self._idx += 1
