@@ -338,10 +338,14 @@ def import_objects(doc, opts, log, progress=None):
         if progress:
             progress(i, len(paths), "Importing " + os.path.basename(full))
 
-        before = set()
+        # c4d.BaseObject is unhashable, so diff by id(). We keep references in
+        # `before_objs` so the wrappers (and thus their ids) stay valid.
+        before_objs = []
+        before_ids = set()
         obj = doc.GetFirstObject()
         while obj:
-            before.add(obj)
+            before_objs.append(obj)
+            before_ids.add(id(obj))
             obj = obj.GetNext()
 
         if not documents.MergeDocument(doc, full, flags):
@@ -351,7 +355,7 @@ def import_objects(doc, opts, log, progress=None):
         new_roots = []
         obj = doc.GetFirstObject()
         while obj:
-            if obj not in before:
+            if id(obj) not in before_ids:
                 new_roots.append(obj)
             obj = obj.GetNext()
 
