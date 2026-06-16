@@ -29,16 +29,37 @@ def _tokenize(name):
     return [t for t in re.split(r"[ _\-.]+", name.lower()) if t]
 
 
-def base_key(obj_name, use_full):
+def base_key(obj_name, use_full, s2=False):
     """Reduce an object name to its grouping base.
 
     Default takes everything before the first dot, which collapses the
     Blender/FBX 'name.name.NNN' pattern (dire_tower002.dire_tower002.010 ->
     dire_tower002). With `use_full`, only a trailing '.NNN' duplicate index is
-    removed."""
+    removed. With `s2`, strip Source 2 mesh boilerplate
+    (n0_lr0_c0_s_cb_nomerge84_water_flow.meshset_0 -> water_flow)."""
+    if s2:
+        return clean_source2(obj_name)
     if use_full:
         return re.sub(r"\.\d+$", "", obj_name)
     return obj_name.split(".")[0]
+
+
+# Source 2 / Dota mesh-name boilerplate: whole-token junk to drop.
+_S2_JUNK = [re.compile(p, re.I) for p in (
+    r"n\d+", r"lr\d+", r"c\d+", r"s", r"cb", r"agg", r"prop",
+    r"nomerge\d*", r"nosplit\d*", r"merge\d*", r"split\d*", r"meshset\d*",
+)]
+
+
+def clean_source2(name):
+    """Strip Source 2 boilerplate to leave the asset name.
+    'n0_lr0_c0_s_cb_nomerge84_water_flow.meshset_0' -> 'water_flow'."""
+    n = re.sub(r"\.meshset_\d+$", "", name, flags=re.I)
+    n = re.sub(r"\.\d+$", "", n)
+    toks = [t for t in re.split(r"[_.]", n) if t]
+    kept = [t for t in toks
+            if not any(p.fullmatch(t) for p in _S2_JUNK)]
+    return "_".join(kept) if kept else name
 
 
 def common_prefix(names):
@@ -89,10 +110,10 @@ def top_level_objects(doc):
     return out
 
 
-def plan_groups(objs, use_full, strip_prefix, do_collapse):
+def plan_groups(objs, use_full, strip_prefix, do_collapse, s2=False):
     """Return (names_per_obj, groups) where names_per_obj is the group name for
     each object, and groups = ordered [(name, count), ...]."""
-    bases = [strip_name_prefix(base_key(o.GetName(), use_full), strip_prefix)
+    bases = [strip_name_prefix(base_key(o.GetName(), use_full, s2), strip_prefix)
              for o in objs]
     names = collapse_part_suffixes(bases) if do_collapse else bases
     order, counts = [], {}
@@ -154,6 +175,7 @@ G_CANCEL = 6007
 G_CLOSE = 6008
 G_LOG = 6009
 G_PROG = 6010
+G_S2 = 6011
 
 _dialog = None
 
@@ -176,6 +198,10 @@ class GroupDialog(gui.GeDialog):
         self.AddStaticText(0, c4d.BFH_LEFT, 95, 0, "Strip prefix", 0)
         self.AddEditText(G_PREFIX, c4d.BFH_SCALEFIT, 0, 0)
         self.GroupEnd()
+
+        self.AddCheckbox(G_S2, c4d.BFH_LEFT, 0, 0,
+                         "Strip Source 2 mesh boilerplate "
+                         "(n0/lr/c/s/cb/nomerge/nosplit/meshset)")
 
         self.GroupBegin(0, c4d.BFH_SCALEFIT, 3, 0, "")
         self.AddCheckbox(G_FULL, c4d.BFH_LEFT, 0, 0,
@@ -205,6 +231,7 @@ class GroupDialog(gui.GeDialog):
 
     def InitValues(self):
         self.SetString(G_PREFIX, "")
+        self.SetBool(G_S2, False)
         self.SetBool(G_FULL, False)
         self.SetBool(G_COLLAPSE, True)
         self.SetBool(G_MIN2, True)
@@ -222,12 +249,13 @@ class GroupDialog(gui.GeDialog):
 
     def _opts(self):
         return (self.GetBool(G_FULL), self.GetString(G_PREFIX).strip(),
-                self.GetBool(G_COLLAPSE), self.GetBool(G_MIN2))
+                self.GetBool(G_COLLAPSE), self.GetBool(G_MIN2),
+                self.GetBool(G_S2))
 
-    def _resolve_prefix(self, objs, use_full):
+    def _resolve_prefix(self, objs, use_full, s2):
         prefix = self.GetString(G_PREFIX).strip()
         if not prefix:
-            prefix = common_prefix([base_key(o.GetName(), use_full)
+            prefix = common_prefix([base_key(o.GetName(), use_full, s2)
                                     for o in objs])
             if prefix:
                 self.SetString(G_PREFIX, prefix)
@@ -276,9 +304,9 @@ class GroupDialog(gui.GeDialog):
         if not objs:
             self.SetString(G_LOG, "No top-level objects in the scene.")
             return
-        use_full, _pf, collapse, min2 = self._opts()
-        prefix = self._resolve_prefix(objs, use_full)
-        _names, groups = plan_groups(objs, use_full, prefix, collapse)
+        use_full, _pf, collapse, min2, s2 = self._opts()
+        prefix = self._resolve_prefix(objs, use_full, s2)
+        _names, groups = plan_groups(objs, use_full, prefix, collapse, s2)
         kept = sum(1 for _n, c in groups if (c >= 2 or not min2))
         self._loglines = ["Group preview (nothing changed yet):", ""]
         self._loglines += self._summary(groups, len(objs), kept, prefix)
@@ -296,9 +324,9 @@ class GroupDialog(gui.GeDialog):
             self.SetString(G_LOG, "No top-level objects in the scene.")
             return
 
-        use_full, _pf, collapse, min2 = self._opts()
-        prefix = self._resolve_prefix(objs, use_full)
-        names, groups = plan_groups(objs, use_full, prefix, collapse)
+        use_full, _pf, collapse, min2, s2 = self._opts()
+        prefix = self._resolve_prefix(objs, use_full, s2)
+        names, groups = plan_groups(objs, use_full, prefix, collapse, s2)
 
         # Which group names are large enough to make a Null for.
         count_by = {}

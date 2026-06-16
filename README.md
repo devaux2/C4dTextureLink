@@ -47,9 +47,13 @@ If you merged one big FBX/glTF, everything lands flat with names like
 `dire_tower002.dire_tower002.010`. This groups top-level objects under Nulls by
 name — by default the base is everything before the first dot
 (`dire_tower002.dire_tower002.010` → `dire_tower002`), so all copies of a model
-go under one Null. Options: strip a common prefix (auto-detect), merge `_N`
-split parts, and "only group 2+ objects" (leave unique objects loose). Positions
-and scale are preserved (it only re-parents). **Preview groups** shows the plan.
+go under one Null. For Source 2 / Dota mesh names like
+`n0_lr0_c0_s_cb_nomerge84_water_flow.meshset_0`, tick **Strip Source 2 mesh
+boilerplate** to peel off the `n0_/lr0_/c0_/s_/cb_/nomergeNNN_/…/.meshset_0`
+wrapper down to the real asset (`water_flow`). Options: strip a common prefix
+(auto-detect), merge `_N` split parts, and "only group 2+ objects" (leave
+unique objects loose). Positions and scale are preserved (it only re-parents).
+**Preview groups** shows the plan.
 
 ## Stage 2 — Instancing (`2_mesh_instancer.py`)
 
