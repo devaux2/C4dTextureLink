@@ -13,7 +13,7 @@ Nothing is modified.
 
 import os
 import c4d
-from c4d import gui, documents
+from c4d import gui, documents, storage
 
 # Friendly names for the common object types we care about.
 TYPE_NAMES = {
@@ -57,18 +57,25 @@ def main():
 
     print(report)
 
-    path = os.path.join(os.path.expanduser("~"), "scene_object_names.txt")
-    saved = ""
+    # Let the user choose where to save the full list.
+    path = storage.SaveDialog(
+        type=c4d.FILESELECTTYPE_ANYTHING,
+        title="Save object name list",
+        force_suffix="txt",
+        def_file="scene_object_names.txt")
+    if not path:
+        gui.MessageDialog("Cancelled - nothing saved.\n(%d objects; full list "
+                          "also printed to the Console.)" % total[0])
+        return
+    if not path.lower().endswith(".txt"):
+        path += ".txt"
     try:
         with open(path, "w") as f:
             f.write(report)
-        saved = "\n\nSaved to: %s" % path
+        gui.MessageDialog("Wrote %d objects to:\n%s" % (total[0], path))
     except Exception as e:
-        saved = "\n\n(could not write file: %s -- copy from here)" % e
-
-    # Show a window with a scrollable, copyable view (first part) + the path.
-    preview = report if len(report) < 6000 else report[:6000] + "\n... (full list in the file)"
-    gui.MessageDialog(preview + saved)
+        gui.MessageDialog("Could not write file:\n%s\n\n%s\n\n(Full list is in "
+                          "the Console.)" % (path, e))
 
 
 if __name__ == "__main__":
