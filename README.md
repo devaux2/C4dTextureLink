@@ -29,6 +29,7 @@ bar, a results log, and a Cancel button; every run is a single undo step.
 | Script | Does |
 | --- | --- |
 | `decimate.py` | In-place polygon reduction of selected meshes (instances follow their master). |
+| `instances_to_scatter.py` | Convert C4D instances into **Octane Scatter** (CSV mode) — one GPU mesh per type, exact placement. |
 
 **Octane material fixes** (on materials already built)
 
@@ -43,6 +44,7 @@ bar, a results log, and a Cancel button; every run is a single undo step.
 | --- | --- |
 | `dump_names.py` | Export every object name + type to a chosen `.txt` (for diagnosing naming). |
 | `octane_probe.py` | Report how one Octane material is wired (channel links + image node settings). |
+| `object_probe.py` | Report a selected object's plugin id + all parameters (used to drive e.g. Octane Scatter). |
 | `instance_check.py` | Explain why two "same model" meshes did/didn't instance. |
 
 ## Getting assets in (format matters)
