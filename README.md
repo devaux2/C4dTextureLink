@@ -30,6 +30,7 @@ bar, a results log, and a Cancel button; every run is a single undo step.
 | --- | --- |
 | `decimate.py` | In-place polygon reduction of selected meshes (instances follow their master). |
 | `instances_to_scatter.py` | Convert C4D instances into **Octane Scatter** (CSV mode) — one GPU mesh per type, exact placement. |
+| `fix_scatter_orientation.py` | Rewrite scatter CSVs (transpose / negate axes) and reload — fixes mis-oriented scatters in place. |
 
 **Octane material fixes** (on materials already built)
 

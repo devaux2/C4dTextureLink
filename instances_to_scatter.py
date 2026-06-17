@@ -77,11 +77,14 @@ def set_csv_file(scatter, path):
 
 
 def mg_to_row(mg):
-    """C4D global matrix -> Octane Scatter CSV row (12 numbers, 3x4)."""
+    """C4D global matrix -> Octane Scatter CSV row (12 numbers, 3x4).
+    Octane reads the 3x3 with the basis vectors as ROWS, so we write the
+    transpose (basis as rows); writing them as columns comes out transposed =
+    upside down."""
     o, a, b, c = mg.off, mg.v1, mg.v2, mg.v3
-    vals = (a.x, b.x, c.x, o.x,
-            a.y, b.y, c.y, o.y,
-            a.z, b.z, c.z, o.z)
+    vals = (a.x, a.y, a.z, o.x,
+            b.x, b.y, b.z, o.y,
+            c.x, c.y, c.z, o.z)
     return " ".join(repr(v) for v in vals)
 
 
