@@ -69,10 +69,10 @@ Parameters:
   [10036] dtype=3  Color7                       None
   [10037] dtype=3  Color8                       None
   [12004] dtype=1  Distribution                 None
-  [10002] dtype=15  Type                         0
+  [10002] dtype=15  Type                         3
   [10000] dtype=133  Surface                      None
   [12007] dtype=1  Csv                          None
-  [10042] dtype=131  File                         None
+  [10042] dtype=131  File                         C:\Users\Theo\Downloads\activity_decision_deck.csv
   [12010] dtype=8  Reload                       None
   [10048] dtype=19  Import Scale                 1.0
   [12009] dtype=1  Parameters                   None
@@ -109,6 +109,6 @@ Parameters:
   [10050] dtype=1009290  Effectors                    None
   [536871777] dtype=11                               None
   [536871778] dtype=1                               None
-  [12012] dtype=1001053                               <c4d.BitmapButtonStruct object at 0x000001F5BDAF2340>
-  [12013] dtype=1001053                               <c4d.BitmapButtonStruct object at 0x000001F5BDB0CFC0>
+  [12012] dtype=1001053                               <c4d.BitmapButtonStruct object at 0x0000020247DF1B40>
+  [12013] dtype=1001053                               <c4d.BitmapButtonStruct object at 0x0000020247DF17C0>
   (105 parameters)
