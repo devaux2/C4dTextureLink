@@ -249,20 +249,37 @@ class ScatterDialog(gui.GeDialog):
             self._doc.InsertObject(scatter)
         scatter.SetMg(c4d.Matrix())            # CSV is read in world space
         scatter[SC_TYPE] = SC_TYPE_CSV
-        scatter[SC_FILE] = csv_path
+        scatter[SC_FILE] = c4d.Filename(csv_path)   # dtype 131 needs a Filename
         scatter[SC_IMPORT_SCALE] = 1.0
+        scatter.Message(c4d.MSG_UPDATE)
         self._doc.AddUndo(c4d.UNDOTYPE_NEW, scatter)
+
+        # Verify the params actually stuck (asymmetric custom datatypes).
+        got_type = scatter[SC_TYPE]
+        got_file = scatter[SC_FILE]
+        if got_type != SC_TYPE_CSV or not got_file:
+            self._log("   ! WARN %s: Type=%s File=%s -- params didn't stick"
+                      % (name, got_type, got_file))
 
         src = master.GetClone()
         src.SetMl(c4d.Matrix())                # template geometry at origin
         src.InsertUnder(scatter)
 
-        # 3. Remove the originals.
+        # 3. Remove the originals (and the now-empty 'Instances' null if any).
+        empties = set()
         for i in insts:
+            up = i.GetUp()
             self._doc.AddUndo(c4d.UNDOTYPE_DELETE, i)
             i.Remove()
+            if (up is not None and up.GetType() == c4d.Onull
+                    and up.GetName() == "Instances"):
+                empties.add(up)
         self._doc.AddUndo(c4d.UNDOTYPE_DELETE, master)
         master.Remove()
+        for n in empties:
+            if n.GetDown() is None:            # only if truly empty now
+                self._doc.AddUndo(c4d.UNDOTYPE_DELETE, n)
+                n.Remove()
 
         self._made += 1
         self._log("   [ok] %-28s %d instance(s) -> Scatter (%s)"
