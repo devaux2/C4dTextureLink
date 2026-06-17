@@ -31,10 +31,49 @@ from c4d import gui, storage, documents
 OCT_SCATTER_ID = 1035961
 SC_TYPE = 10002          # Distribution > Type (cycle)
 SC_TYPE_CSV = 3          # ... "Use Csv File" (Vertex=0/Surface=1/Poisson=2)
-SC_FILE = 10042          # Csv > File
+SC_FILE = 10042          # Csv > File   (custom filename datatype, dtype 131)
+SC_RELOAD = 12010        # Csv > Reload (button)
 SC_IMPORT_SCALE = 10048  # Csv > Import Scale
 
 INST_LINK = c4d.INSTANCEOBJECT_LINK
+
+
+def set_csv_file(scatter, path):
+    """Set the Scatter's Csv File. It's a custom filename datatype (131) that a
+    plain string won't store, so try several ways and verify each by reading it
+    back. Returns True if the path stuck."""
+    def stuck():
+        try:
+            return bool(scatter[SC_FILE])
+        except Exception:
+            return False
+
+    # 1. direct assignment (string)
+    try:
+        scatter[SC_FILE] = path
+    except Exception:
+        pass
+    if stuck():
+        return True
+    # 2. SetParameter with a DescID
+    try:
+        scatter.SetParameter(c4d.DescID(c4d.DescLevel(SC_FILE)), path,
+                             c4d.DESCFLAGS_SET_0)
+    except Exception:
+        pass
+    if stuck():
+        return True
+    # 3. straight into the data container
+    bc = scatter.GetDataInstance()
+    if bc is not None:
+        for setter in ("SetFilename", "SetString"):
+            try:
+                getattr(bc, setter)(SC_FILE, path)
+            except Exception:
+                pass
+            if stuck():
+                return True
+    return stuck()
 
 
 def mg_to_row(mg):
@@ -249,18 +288,24 @@ class ScatterDialog(gui.GeDialog):
             self._doc.InsertObject(scatter)
         scatter.SetMg(c4d.Matrix())            # CSV is read in world space
         scatter[SC_TYPE] = SC_TYPE_CSV
-        scatter[SC_FILE] = c4d.Filename(csv_path)   # dtype 131 needs a Filename
         scatter[SC_IMPORT_SCALE] = 1.0
+        ok_file = set_csv_file(scatter, csv_path)
+        try:
+            c4d.CallButton(scatter, SC_RELOAD)   # make it load the CSV
+        except Exception:
+            pass
         scatter.Message(c4d.MSG_UPDATE)
+
+        # Only commit (delete originals) if the CSV actually took -- otherwise
+        # leave the scene untouched so nothing is lost.
+        if not ok_file or scatter[SC_TYPE] != SC_TYPE_CSV:
+            self._log("   ! WARN %s: Csv File wouldn't set (Type=%s, File=%s) "
+                      "-- kept instances, removed empty scatter"
+                      % (name, scatter[SC_TYPE], scatter[SC_FILE]))
+            scatter.Remove()
+            return
+
         self._doc.AddUndo(c4d.UNDOTYPE_NEW, scatter)
-
-        # Verify the params actually stuck (asymmetric custom datatypes).
-        got_type = scatter[SC_TYPE]
-        got_file = scatter[SC_FILE]
-        if got_type != SC_TYPE_CSV or not got_file:
-            self._log("   ! WARN %s: Type=%s File=%s -- params didn't stick"
-                      % (name, got_type, got_file))
-
         src = master.GetClone()
         src.SetMl(c4d.Matrix())                # template geometry at origin
         src.InsertUnder(scatter)
@@ -280,7 +325,6 @@ class ScatterDialog(gui.GeDialog):
             if n.GetDown() is None:            # only if truly empty now
                 self._doc.AddUndo(c4d.UNDOTYPE_DELETE, n)
                 n.Remove()
-
         self._made += 1
         self._log("   [ok] %-28s %d instance(s) -> Scatter (%s)"
                   % (name, len(insts), os.path.basename(csv_path)))
