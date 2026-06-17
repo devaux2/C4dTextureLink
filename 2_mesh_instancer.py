@@ -1,6 +1,6 @@
 """
-mesh_instancer.py
-=================
+2_mesh_instancer.py  --  STAGE 2: replace duplicate meshes with instances
+=========================================================================
 
 Cinema 4D S24+  --  turn repeated meshes into instances, even when each copy
 has its transform baked into the vertex positions (as decompiled game maps

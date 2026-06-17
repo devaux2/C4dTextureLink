@@ -6,19 +6,44 @@ Run each from the **Script Manager** (`Shift+F11` → open → Execute). Each sc
 is self-contained (no cross-imports) and shows a dialog with a live progress
 bar, a results log, and a Cancel button; every run is a single undo step.
 
+**Core pipeline**
+
 | Stage | Script | Does |
 | --- | --- | --- |
 | 1 | `1_import_objects.py` | Import a folder of objects, organising each file's parts under a named Null. |
-| 1b | `group_objects.py` | Group objects **already in the scene** under Nulls by name (e.g. after merging one big FBX). |
-| 1c | `sort_by_tris.py` | Reorder top-level objects/Nulls by triangle count (heaviest first), with a ranking. |
-| 1d | `organize_scene.py` | Sort the whole top level under ~10 theme Nulls (Water/Trees/Rocks/Structures/Props/Dire/Radiant/Overlays/…). |
-| - | `dump_names.py` | Export every object name to a chosen `.txt` (for diagnosing naming). |
 | 2 | `2_mesh_instancer.py` | Replace duplicated meshes with instances (shape-matched, transform-aware). |
-| 2b | `decimate.py` | In-place polygon reduction of selected meshes (instances follow their master). |
-| 3 | `3_octane_inspector.py` | One-off: read your Octane build's parameter IDs (only if your version differs). |
+| 3 | `3_octane_inspector.py` | One-off: read your Octane build's parameter IDs (only if your version differs from Octane 2025). |
 | 4 | `4_octane_texture_linker.py` | Build Octane Universal materials and wire the matching textures. |
-| 4b | `add_opacity.py` | Add the colour-alpha → Opacity cutout to Octane materials **already textured** (no re-import). |
-| 4c | `fix_albedo.py` | Find Octane materials missing an Albedo, suggest matching colour files from a folder, and assign the best. |
+
+**Organise the scene**
+
+| Script | Does |
+| --- | --- |
+| `group_objects.py` | Group objects **already in the scene** under Nulls by name (after merging one big FBX). Source-2-name aware; nested mode. |
+| `organize_scene.py` | Sort the whole top level under ~10 theme Nulls (Water/Trees/Rocks/Structures/Props/Dire/Radiant/Overlays/…). |
+| `sort_instances.py` | Inside each Null, keep real meshes on top and move instances into an `Instances` sub-Null. |
+| `sort_by_tris.py` | Reorder top-level objects/Nulls by triangle count (heaviest first), with a ranking. |
+
+**Optimise**
+
+| Script | Does |
+| --- | --- |
+| `decimate.py` | In-place polygon reduction of selected meshes (instances follow their master). |
+
+**Octane material fixes** (on materials already built)
+
+| Script | Does |
+| --- | --- |
+| `add_opacity.py` | Add the colour-alpha → Opacity cutout to Octane materials **already textured** (no re-import). |
+| `fix_albedo.py` | Find Octane materials missing an Albedo, suggest matching colour files, and assign the best. |
+
+**Diagnostics** (read-only / safe)
+
+| Script | Does |
+| --- | --- |
+| `dump_names.py` | Export every object name + type to a chosen `.txt` (for diagnosing naming). |
+| `octane_probe.py` | Report how one Octane material is wired (channel links + image node settings). |
+| `instance_check.py` | Explain why two "same model" meshes did/didn't instance. |
 
 ## Getting assets in (format matters)
 

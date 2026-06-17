@@ -1,6 +1,6 @@
 """
-octane_texture_linker.py
-========================
+4_octane_texture_linker.py  --  STAGE 4: build Octane Universal materials + link
+================================================================================
 
 Dedicated Octane texture linker for Cinema 4D (S24+ / Octane 2025).
 

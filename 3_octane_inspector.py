@@ -1,6 +1,6 @@
 """
-octane_inspector.py
-====================
+3_octane_inspector.py  --  STAGE 3: capture this Octane build's parameter IDs
+=============================================================================
 
 Step 1 of the Octane texture-linker. Octane's Python parameter IDs differ
 between versions, so instead of guessing them this script reads the *real* IDs
