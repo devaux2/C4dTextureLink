@@ -28,6 +28,13 @@ from c4d import gui, documents
 # Don't bother reducing meshes already lighter than this (polys).
 MIN_POLYS = 500
 
+# Polygon Reduction generator. The named symbol isn't exposed in every build,
+# so fall back to the plugin ID (1037576) and the raw "reduction strength"
+# parameter id (1000).
+OPOLYREDUX = getattr(c4d, "Opolyreduxgen", 1037576)
+REDUX_STRENGTH = getattr(c4d, "POLYREDUCTIONGEN_REDUCTIONSTRENGTH", 1000)
+_BUILDFLAGS = getattr(c4d, "BUILDFLAGS_NONE", getattr(c4d, "BUILDFLAGS_0", 0))
+
 
 def find_polys_in_selection(doc):
     """Polygon objects within the active selection (recurse into Nulls);
@@ -68,24 +75,23 @@ def _first_polygon(obj):
 def reduce_mesh(src, strength):
     """Return a reduced clone's polygon object, or None. `strength` is the
     fraction removed (0.75 = keep 25%)."""
-    gen = c4d.BaseObject(c4d.Opolyreduxgen)
-    # Reduction strength (fraction removed). Wrapped in case the id differs.
-    try:
-        gen[c4d.POLYREDUCTIONGEN_REDUCTIONSTRENGTH] = strength
-    except Exception:
-        pass
+    gen = c4d.BaseObject(OPOLYREDUX)
+    if gen is None:
+        raise RuntimeError("Polygon Reduction generator unavailable (id %s)"
+                           % OPOLYREDUX)
+    gen[REDUX_STRENGTH] = strength       # fraction removed (0.75 = keep 25%)
     clone = src.GetClone()
-    clone.SetMl(c4d.Matrix())          # bake in local space
+    clone.SetMl(c4d.Matrix())            # bake in local space
     clone.InsertUnder(gen)
 
     tmp = documents.BaseDocument()
     tmp.InsertObject(gen)
-    tmp.ExecutePasses(None, False, False, True, c4d.BUILDFLAGS_NONE)
+    tmp.ExecutePasses(None, True, True, True, _BUILDFLAGS)   # build the cache
     res = c4d.utils.SendModelingCommand(
         c4d.MCOMMAND_CURRENTSTATETOOBJECT, [gen], doc=tmp)
     if not res:
         return None
-    baked = res[0] if isinstance(res, list) else gen.GetClone()
+    baked = res[0] if isinstance(res, list) else res
     return _first_polygon(baked)
 
 
@@ -249,6 +255,10 @@ class DecimateDialog(gui.GeDialog):
             if reduced is None or reduced.GetPolygonCount() == 0:
                 self._log("   ! %s : reduction produced nothing, skipped"
                           % obj.GetName())
+            elif reduced.GetPolygonCount() >= n:
+                self._log("   ! %s : no reduction (%d -> %d) -- strength "
+                          "param id likely wrong" % (obj.GetName(), n,
+                                                     reduced.GetPolygonCount()))
             else:
                 self._doc.AddUndo(c4d.UNDOTYPE_CHANGE, obj)
                 self._before += n
