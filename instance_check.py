@@ -14,8 +14,9 @@ Read-only. Run: Script Manager (Shift+F11) -> open -> Execute.
 
 import hashlib
 import struct
+import os
 import c4d
-from c4d import gui, documents
+from c4d import gui, storage, documents
 
 
 def poly_hash(o):
@@ -177,7 +178,62 @@ def main():
                    "meshes (edited/merged/different LOD). Can't instance.")
     report = "\n".join(out)
     print(report)
-    gui.MessageDialog(report)
+    show_report(report)
+
+
+# --- copyable, scrollable report window with Save ---------------------------
+
+_dialog = None
+_RG_TEXT = 1
+_RG_SAVE = 2
+_RG_CLOSE = 3
+
+
+class ReportDialog(gui.GeDialog):
+    def __init__(self, text):
+        super(ReportDialog, self).__init__()
+        self._text = text
+
+    def CreateLayout(self):
+        self.SetTitle("Instance Check")
+        self.GroupBegin(0, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 1, 0, "")
+        self.GroupBorderSpace(8, 8, 8, 8)
+        self.AddMultiLineEditText(
+            _RG_TEXT, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 0, 420,
+            c4d.DR_MULTILINE_READONLY | c4d.DR_MULTILINE_MONOSPACED)
+        self.GroupBegin(0, c4d.BFH_SCALEFIT, 2, 0, "")
+        self.AddButton(_RG_SAVE, c4d.BFH_LEFT, 120, 0, "Save to file...")
+        self.AddButton(_RG_CLOSE, c4d.BFH_RIGHT, 90, 0, "Close")
+        self.GroupEnd()
+        self.GroupEnd()
+        return True
+
+    def InitValues(self):
+        self.SetString(_RG_TEXT, self._text)
+        return True
+
+    def Command(self, cid, msg):
+        if cid == _RG_SAVE:
+            path = storage.SaveDialog(title="Save report", force_suffix="txt",
+                                      def_file="instance_check.txt")
+            if path:
+                if not path.lower().endswith(".txt"):
+                    path += ".txt"
+                try:
+                    with open(path, "w") as f:
+                        f.write(self._text)
+                    gui.MessageDialog("Saved to:\n%s" % path)
+                except Exception as e:
+                    gui.MessageDialog("Could not save: %s" % e)
+        elif cid == _RG_CLOSE:
+            self.Close()
+        return True
+
+
+def show_report(text):
+    global _dialog
+    _dialog = ReportDialog(text)
+    _dialog.Open(c4d.DLG_TYPE_MODAL_RESIZEABLE, defaultw=620, defaulth=520)
 
 
 if __name__ == "__main__":
